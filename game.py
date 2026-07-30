@@ -590,12 +590,15 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
             for agent in players.current_alive:
                 if not check_player_ready(agent):
                     continue
-                
+
                 # 强制发言：让智能体自由发言
                 speak_prompt = await moderator(
                     f"[轮到你发言] {agent.name}，存活玩家：{names_to_str(players.current_alive)}，请发表你的分析和推理。",
                 )
-                await agent(speak_prompt)
+                speech_msg = await agent(speak_prompt)
+                # Broadcast speech to all other alive players (replaces MsgHub auto-broadcast)
+                if speech_msg:
+                    await alive_players_hub.broadcast(speech_msg)
 
             # Disable auto broadcast to avoid leaking info
             alive_players_hub.set_auto_broadcast(False)
