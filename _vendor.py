@@ -228,7 +228,12 @@ async def fanout_pipeline(
 
 class AgentBase:
     """Minimal stub for agentscope.agent.AgentBase."""
-    pass
+    name: str = ""
+
+    async def __call__(self, content: str) -> "Msg":
+        """Convert a string into a Msg — used by EchoAgent (moderator)."""
+        return Msg(name=getattr(self, "name", "System"),
+                   content=str(content), role="assistant")
 
 
 class ReActAgent(AgentBase):
