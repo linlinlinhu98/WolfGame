@@ -539,7 +539,7 @@ class PlayerAgent(ReActAgentBase):
             f"{body}\n\n"
             f"{vote_extra}"
             f"再次确认: {fact_block}\n"
-            f"基于以上事实推理,输出: 推理: 我怀疑PlayerX因为...(一句话)\n决策: PlayerX"
+            f"基于以上事实推理,输出: 推理: 我怀疑[玩家名]因为...(一句话)\n决策: [玩家名]"
         )
 
     def _get_wolf_mates(self, alive: list) -> list:
@@ -583,18 +583,25 @@ class PlayerAgent(ReActAgentBase):
             h_ok = not wm.healing_used
             p_ok = not wm.poison_used
             nk = wm.night_killed
+            # Build candidate list for poison (all alive except self, and except saved player)
+            poison_candidates = [p for p in alive if p != self.name]
+            poison_list = ", ".join(poison_candidates) if poison_candidates else "无"
             if nk == self.name:
-                heal = f"\n你被袭击了！不能自救。回复: poison:PlayerX / none"
+                heal = f"\n你被狼袭击了！不能自救。"
+                heal += f"\n毒药可选: {poison_list}"
+                heal += f"\n回复: none（不用毒） 或 poison:玩家名"
             elif h_ok and nk:
-                heal = f"\n今晚{nk}被杀。建议救TA（第1轮必救，之后只救预言家/猎人）。"
-                heal += f"\n回复: resurrect / poison:PlayerX / none"
+                heal = f"\n今晚{nk}被杀。建议救TA。"
+                heal += f"\n毒药可选: {poison_list}"
+                heal += f"\n回复: resurrect（救人） 或 poison:玩家名 或 none（都不用）"
             else:
-                heal = "\n回复: poison:PlayerX / none"
+                heal = f"\n毒药可选: {poison_list}"
+                heal += f"\n回复: poison:玩家名 或 none（不用毒）"
             strategy = ""
             if h_ok and wm.round_num == 1:
                 strategy = "\n策略提示: 第1轮被刀的很可能是好人，强烈建议救！"
             if p_ok and wm.round_num >= 2:
-                strategy += "\n策略提示: 毒药还没用，对高度怀疑的玩家使用，别白白浪费。"
+                strategy += "\n策略提示: 毒药还没用，对高度怀疑的玩家使用。"
             return (
                 f"【女巫】解药:{'可用' if h_ok else '已用'} 毒药:{'可用' if p_ok else '已用'}{heal}{strategy}"
             )
@@ -1062,11 +1069,17 @@ class PlayerAgent(ReActAgentBase):
         # Filter wrong player counts (11-20)
         for n in range(11, 21):
             text = re.sub(rf'(?<!\d){n}\s*[人 names 个 位]', f'{self.wm.n_alive}人', text)
-        if len(text) > 350:
-            text = text[:350]
+        if len(text) > 300:
+            # Truncate at last complete sentence within 200-300 range
+            text = text[:300]
             last = max((text.rfind(c) for c in '。！？.!?'), default=-1)
-            if last > 240:
+            if last > 180:
                 text = text[:last + 1]
+            # If no good boundary found, force cut at last comma or space
+            elif len(text) >= 300:
+                alt = max((text.rfind(c) for c in '，, '), default=-1)
+                if alt > 200:
+                    text = text[:alt] + '。'
         return text.strip()
 
     def _fallback(self, suspect: str) -> str:
