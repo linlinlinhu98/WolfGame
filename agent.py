@@ -507,8 +507,12 @@ class PlayerAgent(ReActAgentBase):
             my_speeches = self.memory.my_speeches()
             last_speech = my_speeches[-1] if my_speeches else ""
             my_speech_block = f"你上一轮发言: 「{last_speech[:200]}」\n" if last_speech else ""
+            dead_warn = ""
+            if wm.dead_players:
+                dead_warn = f"❌ 已死玩家（不可投）: {', '.join(wm.dead_players)}\n"
             body = (
-                f"存活: {', '.join(alive)}\n\n"
+                f"存活: {', '.join(alive)}\n"
+                f"{dead_warn}"
                 f"{my_speech_block}"
                 f"讨论摘要:\n{summaries}"
             )
@@ -562,9 +566,9 @@ class PlayerAgent(ReActAgentBase):
             dead_str = f"（已死队友: {', '.join(dead_mates)}）" if dead_mates else ""
             return (
                 f"【狼人杀人】{mate_str}{dead_str}\n"
-                f"⚠️ 绝对禁止杀队友: {', '.join(mates)} ← 这些玩家你绝不能选！\n"
-                f"只能从好人中选: {', '.join(non_wolves)}\n"
-                f"优先杀预言家/女巫/猎人。只回复一个存活好人名。"
+                f"🔴 狼队友（禁止杀）: {', '.join(mates)}\n"
+                f"🟢 好人（可杀）: {', '.join(non_wolves)}\n"
+                f"杀队友=自杀=狼人必输！只从🟢好人中选一个。"
             )
         elif role == "seer":
             ck = wm.seer_checks
@@ -574,10 +578,14 @@ class PlayerAgent(ReActAgentBase):
             unchecked = [p for p in unchecked if p not in wm.dead_players]
             dead_list = [p for p in wm.dead_players]
             dead_warn = f"\n已死玩家（不可查）: {', '.join(dead_list)}" if dead_list else ""
+            already = [p for p in alive if p in ck]
+            repeat_warn = ""
+            if already:
+                repeat_warn = f"\n❌ 已查过: {', '.join(already)} — 禁止重复查验！只能从'未查'列表中选。"
             return (
-                f"【预言家查验】已查:{c_str}\n"
+                f"【预言家查验】已查:{c_str}{repeat_warn}\n"
                 f"未查:{', '.join(unchecked) if unchecked else '无'}{dead_warn}\n"
-                f"只回复存活玩家名。"
+                f"从'未查'列表中回复一个玩家名。"
             )
         elif role == "witch":
             h_ok = not wm.healing_used
@@ -738,12 +746,13 @@ class PlayerAgent(ReActAgentBase):
             f"【认知边界】\n"
             f"你是文字AI，只能从发言内容/投票记录/死亡信息中推理。\n"
             f"禁止说'观察表情''注意反应''看他眼神'等——你看不到别人。\n"
-            f"禁止编造别人没说过的话。\n\n"
+            f"禁止编造别人没说过的话。\n"
+            + (f"❌ 已死玩家: {', '.join(wm.dead_players)} — 绝对不能投已死的人！\n" if wm.dead_players else "")
+            + "\n"
             f"【发言要求】\n"
-            f"如有线索: 指出怀疑对象+理由（发言矛盾/投票异常/查验结果）+声明投谁。\n"
+            f"如有线索: 从存活着中指出怀疑对象+理由+声明投谁。\n"
             f"如无线索: 排除你信任的人，从剩余存活着中随机指一个，说明是随机选择。\n"
-            f"例: '目前信息不足，我排除Player3和Player5(我觉得是好人)，从其余人中随机投Player8。'\n"
-            f"无论哪种情况，都要明确说投谁。发言60-150字。\n"
+            f"无论哪种情况都必须说投谁。发言60-150字。\n"
             f"{deception_rules}\n\n"
             f"格式:\n"
             f"内部: (作为{role}，一句话策略)\n公开: (你的发言)"
@@ -884,6 +893,11 @@ class PlayerAgent(ReActAgentBase):
         if role == "werewolf" and mode in ("night", "vote"):
             mates = self._get_wolf_mates(alive)
 
+        # Seer: prevent re-checking already-verified players
+        already_checked = []
+        if role == "seer" and mode == "night":
+            already_checked = list(self.wm.seer_checks.keys())
+
         # Extract a valid target from LLM response
         m = re.search(r'(Player\d)', text)
         if m:
@@ -893,14 +907,25 @@ class PlayerAgent(ReActAgentBase):
                 print(f"[{self.name}] 拒绝{'杀' if mode=='night' else '投'}队友{candidate}，重选")
                 non_wolves = [p for p in alive if p not in mates and p != self.name]
                 return non_wolves[0] if non_wolves else ""
+            # Seer cannot re-check already checked players
+            if already_checked and candidate in already_checked:
+                print(f"[{self.name}] 拒绝重复查验{candidate}，重选")
+                unchecked = [p for p in alive if p not in already_checked and p != self.name]
+                return unchecked[0] if unchecked else ""
             if candidate in alive and candidate != self.name:
                 return candidate
-        # Fallback: LLM output malformed → pick first valid non-self, non-teammate target
+        # Fallback: LLM output malformed → pick first valid target
         if mates:
             non_wolves = [p for p in alive if p not in mates and p != self.name]
             if non_wolves:
                 print(f"[{self.name}] LLM输出异常，从好人中选: {non_wolves[0]}")
                 return non_wolves[0]
+            return ""
+        if already_checked:
+            unchecked = [p for p in alive if p not in already_checked and p != self.name]
+            if unchecked:
+                print(f"[{self.name}] LLM输出异常，从未查中选: {unchecked[0]}")
+                return unchecked[0]
             return ""
         others = [p for p in alive if p != self.name]
         return others[0] if others else ""
