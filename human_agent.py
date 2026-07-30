@@ -9,7 +9,7 @@ Human input is via console. The game waits for human input at appropriate times.
 import asyncio
 from typing import Any
 
-from agentscope.message import Msg
+from _vendor import Msg
 from agent import PlayerAgent
 from reasoning import GameEvent, EventType, WorkingMemory
 

@@ -17,10 +17,9 @@ Key features:
 import asyncio, os, re, random
 from typing import Dict, List, Any
 
-from agentscope.agent import ReActAgentBase
-from agentscope.message import Msg
-from agentscope.model import OpenAIChatModel
-from agentscope.formatter import DeepSeekMultiAgentFormatter
+from _vendor import (
+    Msg, ReActAgentBase, OpenAIChatModel, DeepSeekMultiAgentFormatter,
+)
 
 # Web UI event emission (no-op if web_ui not loaded)
 try:

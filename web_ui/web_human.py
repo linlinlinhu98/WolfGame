@@ -7,7 +7,7 @@ The server sets the future result when the user submits their action.
 import asyncio
 from typing import Any
 
-from agentscope.message import Msg
+from _vendor import Msg
 from agent import PlayerAgent
 
 

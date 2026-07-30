@@ -9,8 +9,7 @@ import json
 from pathlib import Path
 
 from agent import PlayerAgent
-from agentscope.pipeline._msghub import MsgHub
-from agentscope.pipeline._functional import fanout_pipeline
+from _vendor import MsgHub, fanout_pipeline
 
 from utils import (
     handle_tie_vote,

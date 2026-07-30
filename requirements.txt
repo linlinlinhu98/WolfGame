@@ -1,4 +1,5 @@
-agentscope
+openai>=1.0
 numpy
 shortuuid
 flask
+pydantic

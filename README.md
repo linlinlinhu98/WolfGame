@@ -1,74 +1,62 @@
+# 🐺 狼人杀 · 九人局
 
-# 🐺⚔️👨‍🌾 Nine-Player Werewolves Game
+9人狼人杀多智能体系统，基于 DeepSeek LLM 驱动。
 
-This is a nine-players werewolves game example built using AgentScope, showcasing **multi-agent interactions**,
-**role-based gameplay**, and **structured output handling**.
-Specifically, this game is consisted of
+**角色**: 3狼人 🐺 · 3村民 👨‍🌾 · 1预言家 🔮 · 1女巫 🧙 · 1猎人 🏹
 
-- three villagers 👨‍🌾,
-- three werewolves 🐺,
-- one seer 🔮,
-- one witch 🧙‍♀️ and
-- one hunter 🏹.
+## 特性
 
-## ✨Changelog
+- **认知架构**: 感知 → 记忆(工作+情景+信念) → 推理(策略+心智理论+发言) → 行动
+- **压缩记忆**: SpeechSummary 正则提取，无需额外 LLM 调用
+- **反幻觉**: 事实清单 + 首尾重复(User-shaped attention)
+- **内部/公开分离**: 两阶段推理（内部策略 → 公开发言）
+- **Web 可视化**: 上帝模式(观战9 AI) + 玩家模式(1人类+8 AI)
+- **SSE 实时流**: 回合组织、阶段标签、玩家状态网格
 
-- 2025-10: We update the example to support more features:
-  - Allow the dead players to leave messages.
-  - Support Chinese now.
-  - Support **continuous gaming** by loading and saving session states, so the same agents can play multiple games and continue learning and optimizing their strategies.
-
-## QuickStart
-
-Run the following command to start the game, ensuring you have set up your DashScope API key as an environment variable.
+## 快速开始
 
 ```bash
-python main.py
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 设置 DeepSeek API Key
+set DEEPSEEK_API_KEY=sk-your-key-here        # Windows
+# export DEEPSEEK_API_KEY=sk-your-key-here    # Mac/Linux
+
+# 3. 启动 Web 平台（推荐）
+python server.py
+
+# 或命令行模式
+python main.py          # 上帝模式（9 AI 对战）
+python main.py player   # 玩家模式（你在终端中操作）
 ```
 
-> Note:
->
-> - You can adjust the language, model and other parameters in `main.py`.
-> - Different models may yield different game experiences.
+Web 平台: http://localhost:5000
 
-Running the example with AgentScope Studio provides a more interactive experience.
+## 项目结构
 
-- Demo Video in Chinese (click to play):
-
-[![Werewolf Game in Chinese](https://img.alicdn.com/imgextra/i3/6000000007235/O1CN011pK6Be23JgcdLWmLX_!!6000000007235-0-tbvideo.jpg)](https://cloud.video.taobao.com/vod/KxyR66_CWaWwu76OPTvOV2Ye1Gas3i5p4molJtzhn_s.mp4)
-
-- Demo Video in English (click to play):
-
-[![Werewolf Game in English](https://img.alicdn.com/imgextra/i3/6000000007389/O1CN011alyGK24SDcFBzHea_!!6000000007389-0-tbvideo.jpg)](https://cloud.video.taobao.com/vod/bMiRTfxPg2vm76wEoaIP2eJfkCi8CUExHRas-1LyK1I.mp4)
-
-## Details
-
-The game is built with the ``ReActAgent`` in AgentScope, utilizing its ability to generate structured outputs to
-control the game flow and interactions.
-We also use the ``MsgHub`` and pipelines in AgentScope to manage the complex interactions like discussion and voting.
-It's very interesting to see how agents play the werewolf game with different roles and objectives.
-
-# Advanced Usage
-
-## Change Language
-
-The game is played in English by default. Just uncomment the following line in `game.py` to switch to Chinese.
-
-```python
-# from prompt import ChinesePrompts as Prompts
+```
+agent.py              # PlayerAgent — 认知架构核心
+game.py               # 游戏主循环
+memory.py             # 记忆系统（SpeechSummary, EpisodicMemory, Personas）
+reasoning.py          # 推理引擎（WorkingMemory, BeliefTracker）
+prompt.py             # 中/英文提示词模板
+structured_model.py   # Pydantic 结构化输出模型
+utils.py              # 工具函数（投票、平票处理）
+_vendor.py            # 独立运行的 API 适配层（无 agentscope 依赖）
+human_agent.py        # 终端版人类玩家
+main.py               # 命令行入口
+server.py             # Web 入口
+web_ui/               # Web 前端
+  server.py           # Flask + SSE 后端
+  web_human.py        # Web 人类玩家适配器
+  templates/index.html
+  static/game.js
+  static/style.css
 ```
 
-## Play with Agents
+## 依赖
 
-You can replace one of the agents with a `UserAgent` to play with AI agents.
+`openai`, `numpy`, `shortuuid`, `flask`, `pydantic`
 
-## Change Models
-
-Just modify the `model` parameter in `main.py` to try different models. Note you need to change the formatter at the same time to match the model's output format.
-
-## Further Reading
-
-- [Structured Output](https://doc.agentscope.io/tutorial/task_agent.html#structured-output)
-- [MsgHub and Pipelines](https://doc.agentscope.io/tutorial/task_pipeline.html)
-- [Prompt Formatter](https://doc.agentscope.io/tutorial/task_prompt.html)
-- [AgentScope Studio](https://doc.agentscope.io/tutorial/task_studio.html)
+项目已完全独立，无需安装 agentscope 框架。

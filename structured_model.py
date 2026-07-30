@@ -3,7 +3,7 @@
 from typing import Literal, Optional, Type
 
 from pydantic import BaseModel, Field
-from agentscope.agent import AgentBase
+from _vendor import AgentBase
 
 
 # ── Reasoning Result Model (new - Phase 1) ───────────────────────────

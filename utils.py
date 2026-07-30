@@ -6,11 +6,8 @@ from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
-from agentscope.message._message_block import AudioBlock
+from _vendor import AudioBlock, Msg, ReActAgent, AgentBase
 from prompt import ChinesePrompts as Prompts
-
-from agentscope.message import Msg
-from agentscope.agent import ReActAgent, AgentBase
 
 MAX_GAME_ROUND = 30
 MAX_DISCUSSION_ROUND = 3
