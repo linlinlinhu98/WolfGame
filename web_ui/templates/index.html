@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>狼人杀 · 九人局</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Landing -->
+<div id="landing" class="landing">
+    <h1>狼人杀 · 九人局</h1>
+    <p class="subtitle">3狼 · 3村民 · 1预言家 · 1女巫 · 1猎人</p>
+    <div class="mode-cards">
+        <div class="mode-card" onclick="enterGodMode()">
+            <span class="icon">上帝模式</span><h2>观战</h2><p>观看9个AI对战<br>查看所有隐藏信息</p>
+        </div>
+        <div class="mode-card" onclick="showRoleSelect()">
+            <span class="icon">玩家模式</span><h2>参与</h2><p>选择身份加入游戏<br>和8个AI一起玩</p>
+        </div>
+    </div>
+</div>
+
+<!-- Role Select -->
+<div id="roleSelect" class="role-select" style="display:none">
+    <h2>选择你的身份</h2>
+    <div class="role-grid" id="roleGrid"></div>
+    <button class="back-btn" onclick="goHome()">返回</button>
+</div>
+
+<!-- Game -->
+<div id="game" class="game-board" style="display:none">
+    <header class="game-header">
+        <span class="mode-badge" id="modeBadge"></span>
+        <span id="roundLabel">准备中</span>
+        <span id="phaseLabel"></span>
+        <span class="my-id" id="myId"></span>
+        <nav class="game-nav">
+            <button class="nav-btn" onclick="goHome()">返回首页</button>
+            <button class="nav-btn start" id="startBtn" onclick="startGod()">开始游戏</button>
+            <button class="nav-btn start" id="restartBtn" onclick="restartGame()" style="display:none">开始新游戏</button>
+        </nav>
+    </header>
+
+    <!-- Player Grid (above announce bar) -->
+    <section id="playerGrid" class="player-grid"></section>
+
+    <!-- Announce Bar (important info only) -->
+    <section id="announceBar" class="announce-bar"></section>
+
+    <!-- Input Area (player mode) -->
+    <section id="inputArea" class="input-area" style="display:none">
+        <div id="turnIndicator" class="turn-indicator">轮到你了</div>
+        <div id="actionHint" class="action-hint"></div>
+        <div id="speechInput" style="display:none">
+            <input type="text" id="speechBox" placeholder="输入你的发言..." maxlength="500">
+            <button onclick="submitSpeech()">发送</button>
+        </div>
+        <div id="voteInput" style="display:none"><div id="voteButtons"></div></div>
+        <div id="actionInput" style="display:none"><div id="actionButtons"></div></div>
+    </section>
+
+    <!-- Wolf Channel (player mode) -->
+    <section id="wolfChannel" class="wolf-channel" style="display:none">
+        <h3>狼人频道</h3><div id="wolfLog" class="log"></div>
+    </section>
+
+    <!-- Day & Night columns -->
+    <div class="main-columns">
+        <section id="dayArea" class="panel day-panel">
+            <h3>白天</h3><div id="dayLog" class="log"></div>
+        </section>
+        <section id="nightArea" class="panel night-panel">
+            <h3>夜间</h3><div id="nightLog" class="log"></div>
+        </section>
+    </div>
+</div>
+
+<script src="/static/game.js"></script>
+</body>
+</html>
