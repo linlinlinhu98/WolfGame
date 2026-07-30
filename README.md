@@ -1,17 +1,207 @@
 # 🐺 狼人杀 · 九人局
 
-9人狼人杀多智能体系统，基于 DeepSeek LLM 驱动。
+基于 DeepSeek LLM 的 9 人多智能体狼人杀系统。每个玩家由独立的 AI Agent 驱动，具备完整的认知架构——感知局势、记忆历史、推理策略、生成发言与投票。
 
-**角色**: 3狼人 🐺 · 3村民 👨‍🌾 · 1预言家 🔮 · 1女巫 🧙 · 1猎人 🏹
+---
 
-## 特性
+## 功能
 
-- **认知架构**: 感知 → 记忆(工作+情景+信念) → 推理(策略+心智理论+发言) → 行动
-- **压缩记忆**: SpeechSummary 正则提取，无需额外 LLM 调用
-- **反幻觉**: 事实清单 + 首尾重复(User-shaped attention)
-- **内部/公开分离**: 两阶段推理（内部策略 → 公开发言）
-- **Web 可视化**: 上帝模式(观战9 AI) + 玩家模式(1人类+8 AI)
-- **SSE 实时流**: 回合组织、阶段标签、玩家状态网格
+### 游戏规则
+
+| 阵营 | 角色 | 人数 | 能力 |
+|------|------|------|------|
+| 狼人 | 🐺 狼人 | 3 | 每夜协商杀死一名玩家 |
+| 村民 | 👨‍🌾 村民 | 3 | 无特殊能力，依靠发言和投票推理 |
+| 神职 | 🔮 预言家 | 1 | 每夜查验一名玩家身份 |
+| 神职 | 🧙 女巫 | 1 | 拥有一瓶解药（救人）和一瓶毒药（杀人），各限一次 |
+| 神职 | 🏹 猎人 | 1 | 被淘汰时可开枪带走一名玩家 |
+
+**胜利条件**：狼人阵营存活数 ≥ 好人阵营存活数 → 狼人胜；所有狼人被淘汰 → 好人胜。
+
+### 游戏模式
+
+| 模式 | 说明 |
+|------|------|
+| **上帝模式** | 观看 9 个 AI 对战，所有角色、行动、查验结果完全可见 |
+| **玩家模式** | 选择身份加入游戏，与 8 个 AI 同场竞技。狼人频道显示队友提议 |
+
+### Web 可视化平台（`python server.py` → http://localhost:5000）
+
+- **3×3 玩家状态网格** — 存活/死亡状态 + 角色身份（上帝模式可见）
+- **☀️ 白天区** — 按轮次分组，显示天亮播报、发言环节、投票环节、投票结果、遗言
+- **🌙 夜间区** — 按轮次分组，显示狼人讨论、女巫行动、预言家查验及结果
+- **公告栏** — 实时推送死亡淘汰等关键信息
+- **SSE 实时流** — 无需轮询，游戏事件即时推送到前端
+- **角色专属操作面板**（玩家模式）— 女巫的解药/毒药按钮、狼人队友可见、预言家查验记录
+
+### AI 推理能力
+
+- **认知架构**：感知 → 记忆（工作+情景+信念）→ 推理（策略+心智理论+发言）→ 行动
+- **信念追踪**：每个 Agent 维护对所有人的角色概率估计（贝叶斯更新）
+- **数值推理**：自动推算"游戏未结束→狼人未达半数→最多剩余 X 只狼"
+- **抗幻觉**：事实清单 + 首尾重复（U-shaped attention），关键事实置于 prompt 首尾
+- **言行一致约束**：投票提示词注入本人发言，强制投票与发言中怀疑对象一致
+- **认知边界**：明文禁止编造行为观察（"表情""眼神"等），只能从文本证据推理
+- **9 种人格**：分析型、激进型、保守型、逻辑型、直觉型、质疑型、调和型、策略型、表现型
+
+---
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| **语言** | Python 3.10+ |
+| **LLM** | DeepSeek API（`deepseek-chat`），通过 OpenAI 兼容 SDK 调用 |
+| **后端** | Flask + SSE（Server-Sent Events）实时推送 |
+| **前端** | 原生 HTML + CSS + JavaScript，无框架依赖 |
+| **数据模型** | Pydantic 结构化输出（投票/查验/毒杀/猎人开枪） |
+| **异步** | asyncio（游戏主循环 + 并行 Agent 调用） |
+| **内存** | 正则 SpeechSummary 压缩（零额外 LLM 开销） |
+
+---
+
+## 技术路线
+
+### 1. 分层认知架构
+
+```
+                    ┌──────────────┐
+    原始消息 ──→    │  Perception  │  正则 + 关键词分类 → GameEvent
+                    └──────┬───────┘
+                           ↓
+                    ┌──────────────┐
+                    │   Memory     │  WorkingMemory(快照) + EpisodicMemory(日志)
+                    │              │  + BeliefTracker(ToM概率) + SpeechSummary(压缩)
+                    └──────┬───────┘
+                           ↓
+                    ┌──────────────┐
+                    │  Reasoning   │  _decide(战术) / _discuss(发言)
+                    │              │  两阶段: 内部推理 → 公开发言
+                    └──────┬───────┘
+                           ↓
+                    ┌──────────────┐
+                    │   Action     │  投票/杀人/查验/救人/毒杀/开枪
+                    └──────────────┘
+```
+
+### 2. 记忆系统设计
+
+| 记忆类型 | 存储内容 | 更新方式 | 用途 |
+|----------|----------|----------|------|
+| **WorkingMemory** | 当前存活、死亡、角色、药水状态 | 每条消息实时更新 | 快速决策上下文 |
+| **EpisodicMemory** | 所有 GameEvent 时间线 + 发言原文 | 追加写入，超200条截断 | 复盘、详细检索 |
+| **BeliefTracker** | 每个玩家的狼人概率(0-1) + 证据 | 发言/投票/死亡后贝叶斯更新 | 怀疑度排序 |
+| **SpeechSummary** | 每段发言的指控/辩护/声称/投票意向 | 正则提取，无 LLM 开销 | 压缩后注入 prompt |
+
+### 3. 提示词工程
+
+- **事实清单**：agent 身份、存活/死亡名单、药水状态、查验记录 → 置于 prompt 首尾（利用 LLM 的 primacy + recency 偏差）
+- **反幻觉规则**：禁止编造发言、禁止说错名单、禁止行为观察用语
+- **游戏状态推理**：自动计算 `存活N人 → 最多 max(0, (N-1)//2) 只狼`
+- **发言-投票绑定**：投票 prompt 注入本人上一轮发言原文，显式警告言行不一会被识破
+- **角色策略分化**：狼人伪装村民视角 / 预言家跳身份时机指导 / 女巫藏身份利用夜知信息 / 村民严禁假跳神职
+
+### 4. 完全独立运行
+
+`_vendor.py` 提供 agentscope 框架关键 API 的独立实现（`Msg`, `MsgHub`, `ReActAgentBase`, `OpenAIChatModel`, `fanout_pipeline`），整个项目零框架依赖，`pip install -r requirements.txt` 即可运行。
+
+---
+
+## 运行流程
+
+### 完整一局的生命周期
+
+```
+启动 (python server.py)
+│
+├─ 角色分配
+│   ├── 洗牌: 3狼/3民/1预言家/1女巫/1猎人 → 随机分配9个Agent
+│   ├── 私下告知: 每个Agent收到自己的身份
+│   └── 广播存活名单
+│
+└─ 正式游戏 (最多10轮)
+    │
+    ├── 🌙 夜晚阶段
+    │   ├── 主持人: "天黑了，所有人闭眼。狼人请睁眼。"
+    │   ├── 狼人讨论: 每个狼人依次提议击杀目标(看到前人的提议)
+    │   ├── 狼人投票: 多数决确定击杀目标(平局随机)
+    │   ├── 女巫行动: 决定是否用解药救人 / 毒药杀人
+    │   └── 预言家行动: 查验一名玩家身份
+    │
+    ├── ☀️ 白天阶段
+    │   ├── 天亮播报: 公布夜间死亡名单
+    │   ├── 遗言(仅首轮): 被狼杀的玩家发表最后陈述
+    │   ├── 胜负检查: 狼人≥好人 → 狼胜; 狼人=0 → 好人胜
+    │   │
+    │   ├── 💬 发言环节: 存活玩家按顺序依次发言
+    │   │   └── 每个Agent: 内部推理(策略) → 公开发言(100-180字)
+    │   │
+    │   ├── 🗳 投票环节: 所有人同时投票淘汰一人
+    │   │   ├── 平票 → 平票候选人发言 → 非平票者重投
+    │   │   └── 重投仍平票 → 无人淘汰
+    │   │
+    │   ├── 遗言: 被投票淘汰者发表遗言
+    │   ├── 猎人开枪(如被投者为猎人)
+    │   └── 胜负检查 → 继续下一轮或结束
+    │
+    └── 游戏结束
+        ├── 广播胜负结果
+        └── Web UI 揭示所有角色身份
+```
+
+### Agent 单次决策流程
+
+```
+收到消息
+  │
+  ├── _perceive(msg)
+  │   ├── _classify(): 正则匹配 → GameEvent(发言/死亡/查验/阶段变更...)
+  │   ├── _update_wm(): 更新 WorkingMemory + BeliefTracker
+  │   └── _store_memory(): 写入 EpisodicMemory + 提取 SpeechSummary
+  │
+  ├── _reason()
+  │   ├── 死亡? → 遗言 or 猎人开枪
+  │   ├── 夜晚? → _decide("night")  [仅狼人/预言家/女巫]
+  │   ├── 讨论? → _discuss()        [内部推理 → 公开发言]
+  │   └── 投票? → _decide("vote")   [注入本人发言 + 强制一致]
+  │
+  └── _act()
+      ├── 结构化输出(strict mode, Pydantic校验, 失败重试3次)
+      └── 返回 Msg → 广播给其他Agent or 提交给游戏引擎
+```
+
+### Agent 间通信
+
+所有玩家通过 `MsgHub` 连接——主持人广播消息后，每个 Agent 独立感知、推理、响应。狼人频道在 `MsgHub` 嵌套子 Hub 中，仅狼人可见彼此讨论。
+
+---
+
+## 项目结构
+
+```
+WolfGame/
+├── agent.py              # PlayerAgent: 认知架构核心 (~1000行)
+├── game.py               # 游戏主循环: 夜晚/白天/投票/胜负判定
+├── memory.py             # 记忆系统: SpeechSummary/EpisodicMemory/9种Personas
+├── reasoning.py          # 推理引擎: WorkingMemory/BeliefTracker/GameEvent
+├── prompt.py             # 中/英文提示词模板
+├── structured_model.py   # Pydantic结构化输出模型(投票/查验/毒杀/猎人)
+├── utils.py              # 工具函数: 投票/平票重投/存活名单
+├── _vendor.py            # API适配层: 独立运行,零框架依赖
+├── human_agent.py        # 终端版人类玩家
+├── main.py               # 命令行入口 (god/player模式)
+├── server.py             # Web平台入口
+├── requirements.txt      # openai numpy shortuuid flask pydantic
+├── README.md
+└── web_ui/
+    ├── server.py         # Flask SSE后端 + 游戏管理API
+    ├── web_human.py      # Web人类玩家适配器(asyncio.Future)
+    ├── templates/
+    │   └── index.html    # 前端页面
+    └── static/
+        ├── game.js       # SSE事件处理 + 渲染 + 玩家输入
+        └── style.css     # 样式
+```
 
 ## 快速开始
 
@@ -20,43 +210,13 @@
 pip install -r requirements.txt
 
 # 2. 设置 DeepSeek API Key
-set DEEPSEEK_API_KEY=sk-your-key-here        # Windows
-# export DEEPSEEK_API_KEY=sk-your-key-here    # Mac/Linux
+# Windows:
+set DEEPSEEK_API_KEY=sk-your-key-here
+# Mac/Linux:
+# export DEEPSEEK_API_KEY=sk-your-key-here
 
-# 3. 启动 Web 平台（推荐）
+# 3. 启动 Web 平台
 python server.py
-
-# 或命令行模式
-python main.py          # 上帝模式（9 AI 对战）
-python main.py player   # 玩家模式（你在终端中操作）
 ```
 
-Web 平台: http://localhost:5000
-
-## 项目结构
-
-```
-agent.py              # PlayerAgent — 认知架构核心
-game.py               # 游戏主循环
-memory.py             # 记忆系统（SpeechSummary, EpisodicMemory, Personas）
-reasoning.py          # 推理引擎（WorkingMemory, BeliefTracker）
-prompt.py             # 中/英文提示词模板
-structured_model.py   # Pydantic 结构化输出模型
-utils.py              # 工具函数（投票、平票处理）
-_vendor.py            # 独立运行的 API 适配层（无 agentscope 依赖）
-human_agent.py        # 终端版人类玩家
-main.py               # 命令行入口
-server.py             # Web 入口
-web_ui/               # Web 前端
-  server.py           # Flask + SSE 后端
-  web_human.py        # Web 人类玩家适配器
-  templates/index.html
-  static/game.js
-  static/style.css
-```
-
-## 依赖
-
-`openai`, `numpy`, `shortuuid`, `flask`, `pydantic`
-
-项目已完全独立，无需安装 agentscope 框架。
+打开 http://localhost:5000 → 选择「上帝模式」观战或「玩家模式」参与。
