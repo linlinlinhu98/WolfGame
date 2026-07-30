@@ -823,13 +823,28 @@ class PlayerAgent(ReActAgentBase):
     def _extract_text(self, resp: Any) -> str:
         if resp is None:
             return ""
+        # OpenAI SDK v1: ChatCompletion object
+        if hasattr(resp, "choices") and resp.choices:
+            choice = resp.choices[0]
+            if hasattr(choice, "message") and choice.message:
+                msg = choice.message
+                if hasattr(msg, "content") and isinstance(msg.content, str):
+                    return msg.content.strip()
+                # Tool calls / structured output
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    return str(msg.tool_calls)
+            # Legacy: content directly on choice
+            if hasattr(choice, "content") and isinstance(choice.content, str):
+                return choice.content.strip()
+            return str(choice)
+        # Fallback: resp.content (old API or custom objects)
         if hasattr(resp, "content"):
             c = resp.content
             if isinstance(c, str):
-                return c
+                return c.strip()
             if isinstance(c, list):
-                return "".join(b.get("text", "") for b in c if isinstance(b, dict))
-        return str(resp) if resp else ""
+                return "".join(b.get("text", "") for b in c if isinstance(b, dict)).strip()
+        return str(resp).strip() if resp else ""
 
     # Decision Parsing
 
