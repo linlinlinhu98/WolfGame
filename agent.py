@@ -526,6 +526,14 @@ class PlayerAgent(ReActAgentBase):
                 "⚠️ 你的投票必须与你发言中怀疑的人一致！\n"
                 "如果你发言说了怀疑PlayerX，就必须投PlayerX。言行不一会被识破。\n"
             )
+            # Wolves: never vote to eliminate teammates
+            if role == "werewolf":
+                mates = self._get_wolf_mates(alive)
+                if mates:
+                    vote_extra += (
+                        f"🔴 绝对禁止投狼队友: {', '.join(mates)}！"
+                        f"投队友等于自杀。只能投好人。\n"
+                    )
         return (
             f"已知: {fact_block}\n\n"
             f"{body}\n\n"
@@ -849,22 +857,24 @@ class PlayerAgent(ReActAgentBase):
             m = re.search(r'(Player\d)', text)
             return m.group(1) if m and m.group(1) in alive and m.group(1) != self.name else "none"
 
+        # Werewolves: get mates for teammate protection
+        mates = []
+        if role == "werewolf" and mode in ("night", "vote"):
+            mates = self._get_wolf_mates(alive)
+
         # Extract a valid target from LLM response
         m = re.search(r'(Player\d)', text)
         if m:
             candidate = m.group(1)
-            # Werewolves cannot target teammates
-            if role == "werewolf" and mode == "night":
-                mates = self._get_wolf_mates(alive)
-                if candidate in mates:
-                    print(f"[{self.name}] 拒绝杀队友{candidate}，重选")
-                    non_wolves = [p for p in alive if p not in mates and p != self.name]
-                    return non_wolves[0] if non_wolves else ""
+            # Werewolves cannot target teammates (night or vote)
+            if mates and candidate in mates:
+                print(f"[{self.name}] 拒绝{'杀' if mode=='night' else '投'}队友{candidate}，重选")
+                non_wolves = [p for p in alive if p not in mates and p != self.name]
+                return non_wolves[0] if non_wolves else ""
             if candidate in alive and candidate != self.name:
                 return candidate
         # Fallback: LLM output malformed → pick first valid non-self, non-teammate target
-        if role == "werewolf" and mode == "night":
-            mates = self._get_wolf_mates(alive)
+        if mates:
             non_wolves = [p for p in alive if p not in mates and p != self.name]
             if non_wolves:
                 print(f"[{self.name}] LLM输出异常，从好人中选: {non_wolves[0]}")

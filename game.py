@@ -357,10 +357,22 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                             prior = "；".join(
                                 f"{w}选了{t}" for w, t in wolf_proposals.items()
                             )
-                            vote_prompt = (
-                                f"{Prompts.to_wolves_vote}"
-                                f"（已有狼人选: {prior}。建议统一目标）"
-                            )
+                            # Count which target has most votes so far
+                            from collections import Counter
+                            t_counts = Counter(wolf_proposals.values())
+                            leader = t_counts.most_common(1)[0] if t_counts else None
+                            if leader:
+                                vote_prompt = (
+                                    f"{Prompts.to_wolves_vote}"
+                                    f"（已有狼人选: {prior}。"
+                                    f"目前{leader[0]}领先({leader[1]}票)。"
+                                    f"为了统一目标、避免分歧，强烈建议你也选{leader[0]}！）"
+                                )
+                            else:
+                                vote_prompt = (
+                                    f"{Prompts.to_wolves_vote}"
+                                    f"（已有狼人选: {prior}。建议统一目标）"
+                                )
 
                         night_msg = await wolf(
                             await moderator(vote_prompt),
@@ -435,6 +447,7 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                         
                     # Cannot heal witch herself
                     msg_witch_resurrect = None
+                    saved_player = None  # Track who was saved to prevent self-poison
                     if healing and killed_player and killed_player != agent.name:
                         msg_witch_resurrect = await agent(
                             await moderator(
@@ -447,6 +460,7 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                             retry=2
                         )
                         if msg_witch_resurrect and msg_witch_resurrect.metadata.get("resurrect"):
+                            saved_player = killed_player
                             killed_player = None
                             healing = False
                     elif healing and killed_player and killed_player == agent.name:
@@ -461,18 +475,25 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
 
                     # Has poison potion
                     if poison:
+                        poison_text = Prompts.to_witch_poison.format(witch_name=agent.name)
+                        if saved_player:
+                            poison_text += (
+                                f"\n⚠️ 你刚刚用解药救了 {saved_player}！"
+                                f"绝对不能毒死你亲手救的人！从其他人中选择。"
+                            )
                         msg_witch_poison = await agent(
-                            await moderator(
-                                Prompts.to_witch_poison.format(witch_name=agent.name),
-                            ),
+                            await moderator(poison_text),
                             structured_model=get_poison_model(players.current_alive),
                             strict_mode=True,
                             retry=2
                         )
                         if msg_witch_poison and msg_witch_poison.metadata.get("poison", False):
                             poisoned_player = msg_witch_poison.metadata.get("name")
-                            # 校验毒杀目标存活
+                            # 校验毒杀目标存活，且不能是刚救的人
                             if poisoned_player not in [p.name for p in players.current_alive]:
+                                poisoned_player = None
+                            elif saved_player and poisoned_player == saved_player:
+                                print(f"[女巫] 试图毒死刚救的{saved_player}，已阻止")
                                 poisoned_player = None
                             else:
                                 poison = False
