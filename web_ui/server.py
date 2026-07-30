@@ -15,6 +15,9 @@ game_events: queue.Queue = queue.Queue()
 
 # Current game session
 _session = {"running": False, "mode": None, "human": None, "agents": []}
+_game_generation = 0  # Increments with each new game to filter stale events
+_game_thread = None   # Reference to current game thread
+_game_stop_event = threading.Event()  # Signal old game threads to stop
 
 
 @app.route("/")
@@ -28,7 +31,9 @@ def stream():
         while True:
             try:
                 event = game_events.get(timeout=30)
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                # Filter out events from old game generations
+                if event.get("_gen", 0) >= _game_generation:
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except queue.Empty:
                 yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
     return Response(event_stream(), mimetype="text/event-stream",
@@ -38,22 +43,26 @@ def stream():
 @app.route("/api/start_god", methods=["POST"])
 def start_god():
     """Start god mode: 9 AI agents."""
-    # Allow restart: kill old session and start fresh
-    _reset_session()
+    _stop_old_game()
     _clear_events()
     _session.update(running=True, mode="god", human=None, agents=[])
-    threading.Thread(target=_run_god_game, daemon=True).start()
+    global _game_thread
+    _game_thread = threading.Thread(target=_run_god_game, daemon=True)
+    _game_thread.start()
     return jsonify({"status": "ok", "mode": "god"})
 
 
 @app.route("/api/start_player", methods=["POST"])
 def start_player():
     """Start player mode: 1 human + 8 AI."""
-    _reset_session()
+    _stop_old_game()
     data = request.get_json() or {}
     role_choice = data.get("role", "random")
     _clear_events()
-    threading.Thread(target=_run_player_game, args=(role_choice,), daemon=True).start()
+    _session.update(running=True, mode="player", human=None, agents=[])
+    global _game_thread
+    _game_thread = threading.Thread(target=_run_player_game, args=(role_choice,), daemon=True)
+    _game_thread.start()
     return jsonify({"status": "ok", "mode": "player"})
 
 
@@ -88,27 +97,43 @@ def _clear_events():
         game_events.get_nowait()
 
 
-def _reset_session():
-    """Reset session to allow starting a new game."""
-    # Resolve any pending human input future so old game thread can exit
+def _stop_old_game():
+    """Stop any running game before starting a new one."""
+    global _game_generation, _game_thread, _game_stop_event
+    # Signal old game to stop
+    _game_stop_event.set()
+    # Bump generation so old events are filtered out
+    _game_generation += 1
+    # Resolve any pending human input so old thread can exit
     human = _session.get("human")
     if human and human._pending_future and not human._pending_future.done():
         human._pending_future.set_result("")
-    # Send a reset signal to frontend
-    game_events.put({"type": "reset", "data": {}})
+    # Wait briefly for old thread to notice and exit
+    old_thread = _game_thread
+    if old_thread and old_thread.is_alive():
+        old_thread.join(timeout=2)
+    # Create fresh stop event for new game
+    _game_stop_event = threading.Event()
     _session.update(running=False, mode=None, human=None, agents=[])
+    _game_thread = None
 
 
 @app.route("/api/reset", methods=["POST"])
 def reset():
     """Reset the game session (called on page reload/navigation)."""
-    _reset_session()
+    _stop_old_game()
     _clear_events()
     return jsonify({"status": "ok"})
 
 
 def _emit(t, d):
-    game_events.put({"type": t, "data": d})
+    """Emit a game event tagged with current generation."""
+    game_events.put({"type": t, "data": d, "_gen": _game_generation})
+
+
+def emit_event(event_type, data):
+    """Public emit function (used by game.py and agent.py)."""
+    game_events.put({"type": event_type, "data": data, "_gen": _game_generation})
 
 
 def _run_god_game():

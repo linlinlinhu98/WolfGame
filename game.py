@@ -32,9 +32,11 @@ from prompt import ChinesePrompts as Prompts
 
 # Optional web UI integration
 try:
-    from web_ui.server import emit_event as _emit_web_event
+    from web_ui.server import emit_event as _emit_web_event, _game_stop_event
 except ImportError:
     _emit_web_event = lambda t, d: None  # no-op if web_ui not available
+    from threading import Event as _ThreadingEvent
+    _game_stop_event = _ThreadingEvent()  # never set in console mode
 
 moderator = EchoAgent()
 
@@ -308,6 +310,10 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                      for a in agents]
     })
     for round_idx in range(MAX_GAME_ROUND):
+        # Check if game was stopped (new game started in web UI)
+        if _game_stop_event.is_set():
+            print(f"游戏被中断（第{round_idx + 1}轮）")
+            return
         print(f"\n游戏第 {round_idx + 1} 轮")
         _emit_web_event("phase_change", {"phase": "night", "round": round_idx + 1})
         _emit_web_event("phase_log", {"panel": "night", "text": Prompts.to_all_night})
