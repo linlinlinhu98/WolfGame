@@ -719,14 +719,23 @@ class PlayerAgent(ReActAgentBase):
                 if role == "hunter" and "猎人" in c:
                     verify_lines.append(f"⚠️ {s.speaker}{c}！你是真猎人，TA是假的！")
 
-        # Seer with wolf check: forced reveal
-        has_wolf = role == "seer" and any(r == "werewolf" for r in wm.seer_checks.values())
-        if has_wolf:
-            wolf_names = [n for n, r in wm.seer_checks.items() if r == "werewolf"]
-            format_line = (
-                f"🔴 你查到狼人了！公开发言必须以'我是预言家'开头！\n"
-                f"公开: 我是预言家，我查了{', '.join(wolf_names)}是狼人！投票出TA！"
-            )
+        # Seer: MUST use check results in speech
+        if role == "seer" and wm.seer_checks:
+            ck_list = "，".join(f"{n}是{r}" for n, r in wm.seer_checks.items())
+            good_list = [n for n, r in wm.seer_checks.items() if r != "werewolf"]
+            wolf_list = [n for n, r in wm.seer_checks.items() if r == "werewolf"]
+            if wolf_list:
+                format_line = (
+                    f"🔴 你查到狼人: {', '.join(wolf_list)}！必须跳身份！\n"
+                    f"内部: (跳预言家)\n"
+                    f"公开: 我是预言家，我查了{', '.join(wolf_list)}是狼人！所有人投票出TA！"
+                )
+            else:
+                format_line = (
+                    f"你的查验记录: {ck_list}。"
+                    + (f" {', '.join(good_list)}是好人，你必须在发言中保护TA、引导投票远离TA！" if good_list else "")
+                    + "\n内部: (策略)\n公开: (如果信息足够可跳身份，否则以村民视角保护查验的好人，指出怀疑对象+投谁)"
+                )
         elif is_wolf:
             format_line = (
                 "内部: (伪装策略一句话)\n"
