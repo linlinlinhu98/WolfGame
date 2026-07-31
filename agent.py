@@ -468,82 +468,64 @@ class PlayerAgent(ReActAgentBase):
     # Prompt Builders — personalized + full context
 
     def _build_decision_prompt(self, mode: str) -> str:
-        """Decision prompt — uses Fact Checklist + Recency Repetition.
-
-        Inspired by research on U-shaped attention (Chowdhury 2025):
-        - Critical facts placed at BOTH start and end
-        - LLM must acknowledge facts before reasoning
-        - Token budget <500 to keep facts in attention window
-        """
+        """Decision prompt — compact, critical info first, format last."""
         wm = self.wm
         alive = wm.alive_players
         role = wm.my_role
         camp_label = "狼人" if wm.my_camp == "werewolf" else "好人"
-
-        # Build fact checklist — MUST include agent's own name
         n_alive = wm.n_alive
-        max_wolves = min(3, (n_alive - 1) // 2)  # Game continues → good > wolves
-        facts = [f"我是{self.name}, 身份={role}({camp_label})"]
-        facts.append(f"存活{n_alive}人→最多{max_wolves}狼")
-        if wm.dead_players:
-            facts.append(f"已死={','.join(wm.dead_players)}")
-        if wm.healing_used:
-            facts.append(f"解药=已用")
-        if wm.poison_used:
-            facts.append(f"毒药=已用")
-        if wm.seer_checks:
-            items = [f"{n}={r}" for n, r in wm.seer_checks.items()]
-            facts.append(f"查验={', '.join(items)}")
-        fact_block = " | ".join(facts)
+        max_wolves = min(3, (n_alive - 1) // 2)
 
-        # Summaries in the middle (short, compressed)
-        summaries = format_speech_summaries(self._speech_summaries, max_per_round=10)
+        # ── Line 1: Identity (MUST be read first) ──
+        identity = f"你是{self.name}，身份{role}({camp_label})。存活{n_alive}人，最多{max_wolves}狼。"
+
+        # ── Forbidden rules (compact, at top) ──
+        forbid = []
+        if wm.dead_players:
+            forbid.append(f"禁止投已死玩家: {', '.join(wm.dead_players)}")
+        if role == "werewolf":
+            mates = self._get_wolf_mates(alive)
+            if mates:
+                forbid.append(f"禁止杀/投狼队友: {', '.join(mates)}")
+        if role == "seer" and mode == "night":
+            already = [p for p in alive if p in wm.seer_checks]
+            if already:
+                forbid.append(f"禁止重复查验: {', '.join(already)}")
+        forbid_block = "\n".join(f"❌ {f}" for f in forbid) if forbid else ""
+
+        # ── Summaries ──
+        summaries = format_speech_summaries(self._speech_summaries, max_per_round=8)
         if not summaries.strip():
             summaries = "暂无讨论"
 
-        # Build by mode
+        # ── Body (mode-specific) ──
         if mode == "vote":
-            # Include agent's own speech to enforce speech-vote consistency
             my_speeches = self.memory.my_speeches()
             last_speech = my_speeches[-1] if my_speeches else ""
-            my_speech_block = f"你上一轮发言: 「{last_speech[:200]}」\n" if last_speech else ""
-            dead_warn = ""
-            if wm.dead_players:
-                dead_warn = f"❌ 已死玩家（不可投）: {', '.join(wm.dead_players)}\n"
+            my_speech_block = f"你发言说过: 「{last_speech[:150]}」\n" if last_speech else ""
             body = (
-                f"存活: {', '.join(alive)}\n"
-                f"{dead_warn}"
+                f"存活玩家: {', '.join(alive)}\n"
                 f"{my_speech_block}"
+                f"投票必须与发言一致！发言怀疑谁就投谁。\n"
                 f"讨论摘要:\n{summaries}"
             )
         elif mode == "night":
-            body = f"{self._night_role_body()}\n\n{summaries}"
+            body = f"{self._night_role_body()}"
         elif mode == "hunter_shot":
-            body = f"存活: {', '.join(alive)}\n\n{summaries}"
+            body = f"存活: {', '.join(alive)}"
         else:
             body = summaries
 
-        # Fact checklist at START (primacy) + END (recency)
-        vote_extra = ""
-        if mode == "vote":
-            vote_extra = (
-                "⚠️ 你的投票必须与你发言中怀疑的人一致！\n"
-                "如果你发言说了怀疑PlayerX，就必须投PlayerX。言行不一会被识破。\n"
-            )
-            # Wolves: never vote to eliminate teammates
-            if role == "werewolf":
-                mates = self._get_wolf_mates(alive)
-                if mates:
-                    vote_extra += (
-                        f"🔴 绝对禁止投狼队友: {', '.join(mates)}！"
-                        f"投队友等于自杀。只能投好人。\n"
-                    )
+        # ── Format ──
+        fmt = "推理: (一句话)\n决策: [玩家名]"
+        if role == "witch" and mode == "night":
+            fmt = "推理: (一句话)\n决策: resurrect 或 poison:玩家名 或 none"
+
         return (
-            f"已知: {fact_block}\n\n"
-            f"{body}\n\n"
-            f"{vote_extra}"
-            f"再次确认: {fact_block}\n"
-            f"基于以上事实推理,输出: 推理: 我怀疑[玩家名]因为...(一句话)\n决策: [玩家名]"
+            f"{identity}\n"
+            + (f"{forbid_block}\n" if forbid_block else "")
+            + f"\n{body}\n\n"
+            f"{fmt}"
         )
 
     def _get_wolf_mates(self, alive: list) -> list:
@@ -616,33 +598,62 @@ class PlayerAgent(ReActAgentBase):
         return "回复none。"
 
     def _build_discussion_prompt(self, is_last_words: bool = False) -> str:
-        """Two-pass discussion prompt: fact grounding → strategy → speech.
-
-        Like Claude Code's harness: first verify what's known, then generate.
-        Wolves are allowed strategic deception but NOT fabricating facts.
-        """
+        """Discussion prompt — critical rules first, context middle, format last."""
         wm = self.wm
         alive = wm.alive_players
         role = wm.my_role
         camp = "狼人" if wm.my_camp == "werewolf" else "好人"
         is_wolf = role == "werewolf"
+        n_alive = wm.n_alive
+        max_wolves = min(3, (n_alive - 1) // 2)
 
-        # Progressive memory
+        # ═══════════════════════════════════════════
+        # SECTION 1: IDENTITY + CRITICAL RULES (top — must read)
+        # ═══════════════════════════════════════════
+        lines = []
+        lines.append(f"═══ 你是 {self.name} | 身份 {role}({camp}) | 第{wm.round_num}轮 | 存活{n_alive}人 最多{max_wolves}狼 ═══")
+
+        # Critical prohibitions — one line each, at top
+        dead_list = wm.dead_players
+        if dead_list:
+            lines.append(f"❌ 已死（禁止投/禁止杀/禁止查）: {', '.join(dead_list)}")
+        if is_wolf:
+            mates = [p for p in alive if self.state.get("name_to_role", {}).get(p) == "werewolf" and p != self.name]
+            if mates:
+                lines.append(f"❌ 你的狼队友（禁止杀/禁止投）: {', '.join(mates)}")
+            lines.append(f"存活狼人: {len(mates)+1}个。杀队友=自杀。")
+        if role == "seer":
+            ck = wm.seer_checks
+            if ck:
+                lines.append(f"🔮 你查验过: {', '.join(f'{n}={r}' for n,r in ck.items())}")
+        if role == "witch":
+            lines.append(f"🧙 解药{'已用' if wm.healing_used else '可用'} | 毒药{'已用' if wm.poison_used else '可用'}")
+        if is_last_words:
+            lines.append(f"⚠️ 你是{self.name}，已被淘汰，这是遗言！")
+        if wm.round_num <= 1:
+            lines.append("⚠️ 这是第1轮，没有历史发言。不要编造'前几轮''之前他说过'等内容！")
+
+        # ═══════════════════════════════════════════
+        # SECTION 2: CONTEXT (summaries, votes)
+        # ═══════════════════════════════════════════
+        # Current round speeches before me
         all_summaries = self._speech_summaries
-        spoke = [s.speaker for s in all_summaries if s.speaker != self.name]
+        spoke = []
         seen = set()
-        spoke = [s for s in spoke if not (s in seen or seen.add(s))]
+        for s in all_summaries:
+            if s.speaker != self.name and s.speaker not in seen:
+                seen.add(s.speaker)
+                spoke.append(s.speaker)
         pos = len(spoke) + 1
-        still = [p for p in alive if p not in spoke and p != self.name]
         current_round = wm.round_num
-        before_me = [s for s in all_summaries
-                     if s.round_num == current_round and s.speaker in spoke]
+        before_me = [s for s in all_summaries if s.round_num == current_round and s.speaker in spoke]
         current_context = format_speech_summaries(before_me) if before_me else "（你是本轮第一个发言）"
 
+        # Past rounds
         past_summaries = [s for s in all_summaries if s.round_num < current_round]
         past_context = ""
         if past_summaries:
-            by_round: dict[int, list] = {}
+            by_round = {}
             for s in past_summaries:
                 by_round.setdefault(s.round_num, []).append(s)
             past_lines = []
@@ -651,139 +662,60 @@ class PlayerAgent(ReActAgentBase):
                 if line:
                     past_lines.append(f"第{r}轮: {line}")
             if past_lines:
-                past_context = "\n".join(past_lines)
-            elif wm.round_num <= 1:
-                past_context = "（这是第1轮，还没有前几轮的发言和投票记录。不要编造不存在的历史！）"
+                past_context = "\n".join(past_lines[-3:])
 
-        # Vote history for pattern analysis
+        # Vote history
         vote_entries = [e for e in self.memory.entries if e.type == EntryType.VOTE]
         vote_context = ""
         if len(vote_entries) >= 2:
-            # Group votes by round
-            by_rnd: dict[int, list] = {}
+            by_rnd = {}
             for e in vote_entries:
                 by_rnd.setdefault(e.round_num, []).append(e)
-            vote_lines = []
+            vl = []
             for r in sorted(by_rnd.keys()):
-                voters = [f"{v.speaker}→{v.content[:30]}" for v in by_rnd[r]]
-                vote_lines.append(f"第{r}轮投票: {', '.join(voters)}")
-            if vote_lines:
-                vote_context = "\n".join(vote_lines[-3:])  # Last 3 rounds
+                voters = [f"{v.speaker}→{v.content[:20]}" for v in by_rnd[r]]
+                vl.append(f"第{r}轮投票: {', '.join(voters)}")
+            if vl:
+                vote_context = "\n".join(vl[-3:])
 
-        # Known facts (verifiable from memory)
-        n_total = 9
-        n_alive = wm.n_alive
-        n_dead = wm.n_dead
-        n_wolves_total = 3  # 9-player game: 3 wolves
+        # ═══════════════════════════════════════════
+        # SECTION 3: STRATEGY + FORMAT (at end — recency)
+        # ═══════════════════════════════════════════
+        strategy = self._strategy_hint()
 
-        # Deduction: if game continues, wolves haven't won → good > wolves
-        # n_alive = n_good + n_wolves. So n_wolves < n_alive/2
-        max_remaining_wolves = (n_alive - 1) // 2
-        if max_remaining_wolves > 3:
-            max_remaining_wolves = 3
-
-        # Count confirmed dead wolves (known to this agent)
-        confirmed_dead_wolves = 0
-        if is_wolf:
-            for p in wm.dead_players:
-                if self.state.get("name_to_role", {}).get(p) == "werewolf":
-                    confirmed_dead_wolves += 1
-
-        known_facts = [f"你是{self.name}，身份{role}。"]
-        known_facts.append(
-            f"共{n_total}人，{n_wolves_total}狼。存活{n_alive}人，已死{n_dead}人。"
-        )
-        known_facts.append(
-            f"⚠️ 核心推理：游戏未结束→狼人未达半数→当前最多剩{max_remaining_wolves}个狼人！"
-        )
-        if is_wolf:
-            mates = [p for p in alive
-                     if self.state.get("name_to_role", {}).get(p) == "werewolf"
-                     and p != self.name]
-            known_facts.append(f"狼队友: {', '.join(mates) if mates else '无'}。"
-                             f" 存活狼人共{len(mates)+1}个。")
-        if wm.dead_players:
-            known_facts.append(f"已死: {', '.join(wm.dead_players)}。")
-        if confirmed_dead_wolves > 0:
-            known_facts.append(f"已确认死亡的狼人: {confirmed_dead_wolves}个。")
-        if wm.seer_checks:
-            items = [f"{n}={r}" for n, r in wm.seer_checks.items()]
-            known_facts.append(f"查验结果: {', '.join(items)}。")
-        if wm.healing_used:
-            known_facts.append("解药已用。")
-        if wm.poison_used:
-            known_facts.append("毒药已用。")
-
-        # Deception rules
-        if is_wolf:
-            deception_rules = (
-                "⚠️ 发言规则（狼人）:\n"
-                "你可以: 伪装身份、假装怀疑好人、引导投票方向。\n"
-                "禁止: 编造不存在的发言、说错人数/名单、暴露狼队友。"
+        # Seer with wolf check: forced reveal
+        has_wolf = role == "seer" and any(r == "werewolf" for r in wm.seer_checks.values())
+        if has_wolf:
+            wolf_names = [n for n, r in wm.seer_checks.items() if r == "werewolf"]
+            format_line = (
+                f"🔴 你查到狼人了！公开发言必须以'我是预言家'开头！\n"
+                f"公开: 我是预言家，我查了{', '.join(wolf_names)}是狼人！投票出TA！"
+            )
+        elif is_wolf:
+            format_line = (
+                "内部: (伪装策略一句话)\n"
+                "公开: (以村民视角发言，指出怀疑对象+理由+投谁，60-150字)"
             )
         else:
-            if role in ("seer", "witch", "hunter"):
-                deception_rules = (
-                    "⚠️ 发言规则（神职）:\n"
-                    "可以说谎隐藏身份，但不要假跳其他神职。\n"
-                    "怀疑对象+分析理由+投票目标，三者必须一致。"
-                )
-            else:
-                deception_rules = (
-                    "⚠️ 发言规则（村民）:\n"
-                    "你是村民，必须说真话。绝对禁止假跳预言家/女巫/猎人！\n"
-                    "假跳不会帮好人，只会让真神职被怀疑、让狼人有机可乘。\n"
-                    "你的任务: 分析矛盾→指出嫌疑→投票淘汰狼人。"
-                )
-
-        last_note = ""
-        if is_last_words:
-            last_note = f"⚠️ 你({self.name})已被淘汰，遗言！不要说'我会'等未来式。\n"
-
-        suspect_context = ""
-        if self.bt:
-            top = self.bt.get_suspect_ranking(alive)[:2]
-            for name, score in top:
-                if score > 0.35:
-                    mentions = [s for s in all_summaries
-                               if name in s.accusations or name in s.defenses]
-                    if mentions:
-                        suspect_context += f"关于{name}: {format_speech_summaries(mentions, max_per_round=3)}\n"
-
-        return (
-            f"9人局 | 第{wm.round_num}轮 | 存活{wm.n_alive}已死{wm.n_dead} | "
-            f"你是{role}({camp}) | 第{pos}位发言\n\n"
-            f"【已知事实】\n" + "\n".join(f"- {f}" for f in known_facts) + "\n\n"
-            f"【你的性格】{self.persona.to_prompt()}\n{self._strategy_hint()}\n"
-            f"{last_note}\n"
-            f"【前几轮摘要】\n{past_context}\n\n"
-            + (f"【投票记录】\n{vote_context}\n\n" if vote_context else "")
-            + f"【本轮之前发言】\n{current_context}\n\n"
-            f"{suspect_context}"
-            f"【你的怀疑度】\n{self.bt.get_belief_summary(alive) if self.bt else '暂无'}\n\n"
-            f"【认知边界】\n"
-            f"你是文字AI，只能从发言内容/投票记录/死亡信息中推理。\n"
-            f"禁止说'观察表情''注意反应''看他眼神'等——你看不到别人。\n"
-            f"禁止编造别人没说过的话。\n"
-            + (f"❌ 已死玩家: {', '.join(wm.dead_players)} — 绝对不能投已死的人！\n" if wm.dead_players else "")
-            + "\n"
-            f"【发言要求】\n"
-            f"如有线索: 从存活着中指出怀疑对象+理由+声明投谁。\n"
-            f"如无线索: 排除你信任的人，从剩余存活着中随机指一个，说明是随机选择。\n"
-            f"无论哪种情况都必须说投谁。发言60-150字。\n"
-            f"{deception_rules}\n\n"
-            + (
-                # Seer with wolf check: FORCE public reveal
-                f"🔴 你是预言家，你已查验出狼人！你的公开发言必须以'我是预言家'开头，"
-                f"直接说出查验结果！格式:\n"
-                f"内部: (我要跳身份)\n"
-                f"公开: 我是预言家，第1晚查了PlayerX是狼人！所有人跟我投票出PlayerX！\n"
-                if role == "seer" and any(r == "werewolf" for r in wm.seer_checks.values())
-                else (
-                    f"格式:\n内部: (作为{role}，一句话策略)\n公开: (你的发言)"
-                )
+            format_line = (
+                "内部: (策略一句话)\n"
+                "公开: (指出怀疑对象+理由+投谁，60-150字)"
             )
-        )
+
+        # ── Assemble ──
+        parts = [
+            "\n".join(lines),
+            "",
+        ]
+        if past_context:
+            parts.append(f"【历史摘要】\n{past_context}\n")
+        if vote_context:
+            parts.append(f"【投票记录】\n{vote_context}\n")
+        parts.append(f"【本轮发言】第{pos}位\n{current_context}")
+        parts.append(f"\n【策略】\n{strategy}")
+        parts.append(f"\n【回复格式】\n{format_line}")
+
+        return "\n".join(parts)
 
     def _strategy_hint(self) -> str:
         """Role-specific strategy guidance with win condition."""
