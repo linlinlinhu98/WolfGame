@@ -61,7 +61,7 @@ class PlayerAgent(ReActAgentBase):
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY not set")
         self.model = OpenAIChatModel(
-            model_name="deepseek-chat", api_key=api_key, stream=False,
+            model_name="deepseek-reasoner", api_key=api_key, stream=False,
             client_kwargs={"base_url": "https://api.deepseek.com"},
         )
         self.formatter = DeepSeekMultiAgentFormatter()
@@ -1196,7 +1196,7 @@ class PlayerAgent(ReActAgentBase):
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if api_key:
             self.model = OpenAIChatModel(
-                model_name="deepseek-chat", api_key=api_key, stream=False,
+                model_name="deepseek-reasoner", api_key=api_key, stream=False,
                 client_kwargs={"base_url": "https://api.deepseek.com"},
             )
         self.formatter = DeepSeekMultiAgentFormatter()
