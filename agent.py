@@ -689,6 +689,36 @@ class PlayerAgent(ReActAgentBase):
         # ═══════════════════════════════════════════
         strategy = self._strategy_hint()
 
+        # ═══════════════════════════════════════════
+        # VERIFICATION: Cross-check public claims against private knowledge
+        # ═══════════════════════════════════════════
+        verify_lines = []
+        for s in all_summaries:
+            if s.speaker == self.name:
+                continue
+            for rpt in s.reported:
+                if self.name in rpt:
+                    claim = rpt.replace(self.name, "").strip()
+                    if role == "seer" and ("预言家" in claim or "seer" in claim.lower()):
+                        verify_lines.append(f"⚠️ {s.speaker}声称{self.name}{claim}。你是真预言家！{s.speaker}在假冒你的身份！必须在发言中揭穿TA！")
+                    elif role == "hunter" and ("猎人" in claim or "hunter" in claim.lower()):
+                        verify_lines.append(f"✅ {s.speaker}说你是猎人——这是真的！{s.speaker}能准确说出你的身份，说明TA很可能是真预言家或有特殊信息。你应该公开承认并支持TA！")
+                    elif role == "witch" and ("女巫" in claim or "witch" in claim.lower()):
+                        verify_lines.append(f"⚠️ {s.speaker}声称{self.name}{claim}。你是真女巫！{s.speaker}可能是预言家查了你，也可能是狼在猜。谨慎判断。")
+                    elif role == "werewolf" and ("狼人" in claim or "werewolf" in claim.lower()):
+                        verify_lines.append(f"🔴 {s.speaker}说你是狼人——TA说对了！你必须反驳TA、引导怀疑转向TA或别人。")
+                    elif role == "villager" and ("村民" in claim or "villager" in claim.lower()):
+                        verify_lines.append(f"✅ {s.speaker}说你是村民——这是真的。TA怎么知道的？如果是预言家查了你，TA值得信任。")
+                    else:
+                        verify_lines.append(f"❓ {s.speaker}声称{self.name}{claim}。你的真实身份是{role}。判断TA是在说谎还是猜的。")
+            for c in s.claims:
+                if role == "seer" and "预言家" in c:
+                    verify_lines.append(f"⚠️ {s.speaker}{c}！你是真预言家，TA是假的！必须揭穿！")
+                if role == "witch" and "女巫" in c:
+                    verify_lines.append(f"⚠️ {s.speaker}{c}！你是真女巫，TA是假的！")
+                if role == "hunter" and "猎人" in c:
+                    verify_lines.append(f"⚠️ {s.speaker}{c}！你是真猎人，TA是假的！")
+
         # Seer with wolf check: forced reveal
         has_wolf = role == "seer" and any(r == "werewolf" for r in wm.seer_checks.values())
         if has_wolf:
@@ -713,6 +743,10 @@ class PlayerAgent(ReActAgentBase):
             "\n".join(lines),
             "",
         ]
+        if verify_lines:
+            parts.append("【⚠️ 验证：别人说了关于你的事——用你的私人知识判断真假】")
+            parts.extend(verify_lines)
+            parts.append("")
         if past_context:
             parts.append(f"【历史摘要】\n{past_context}\n")
         if vote_context:
