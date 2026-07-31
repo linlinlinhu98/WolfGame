@@ -327,10 +327,22 @@ function buildActionBtns() {
 function submitSpeech() { const box=document.getElementById("speechBox"); const t=box.value.trim(); if(t){send(t);box.value="";} }
 document.addEventListener("keydown", e => { if(e.key==="Enter"&&document.activeElement.id==="speechBox") submitSpeech(); });
 async function send(text) {
-    await fetch("/api/player_input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+    try {
+        await fetch("/api/player_input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+    } catch(e) { console.error("send error", e); }
     hideInput();
-    // Immediately check if there's a follow-up prompt (witch step 2, etc.)
-    setTimeout(checkTurn, 100);
+    waiting = false;
+    // Poll immediately, then again quickly if still waiting
+    await checkTurnNow();
+    if (!waiting) setTimeout(checkTurnNow, 200);
+}
+async function checkTurnNow() {
+    try {
+        const r = await fetch("/api/player_state");
+        const d = await r.json();
+        if (d.waiting && !waiting) { waiting = true; ctx = d.info||{}; showInput(); }
+        else if (!d.waiting && waiting) { waiting = false; hideInput(); }
+    } catch(e) {}
 }
 
 function renderPlayers() {
