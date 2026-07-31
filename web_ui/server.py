@@ -11,13 +11,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import Flask, render_template, Response, request, jsonify
 
 app = Flask(__name__)
-game_events: queue.Queue = queue.Queue()
+
+# Each game gets its own queue; SSE only reads from the newest one.
+# Old threads write to their captured queue (nobody reads → silent discard).
+_current_queue: queue.Queue = queue.Queue()
 
 # Current game session
 _session = {"running": False, "mode": None, "human": None, "agents": []}
-_game_generation = 0  # Increments with each new game to filter stale events
 _game_thread = None   # Reference to current game thread
 _game_stop_event = threading.Event()  # Signal old game threads to stop
+
+
+def _make_emit(q: queue.Queue):
+    """Create an emit function bound to a specific queue."""
+    def _emit(t, d):
+        q.put({"type": t, "data": d})
+    return _emit
 
 
 @app.route("/")
@@ -30,7 +39,7 @@ def stream():
     def event_stream():
         while True:
             try:
-                event = game_events.get(timeout=30)
+                event = _current_queue.get(timeout=30)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except queue.Empty:
                 yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
@@ -91,25 +100,21 @@ def api_status():
 
 
 def _clear_events():
-    while not game_events.empty():
-        game_events.get_nowait()
+    while not _current_queue.empty():
+        _current_queue.get_nowait()
 
 
 def _stop_old_game():
     """Stop any running game before starting a new one."""
-    global _game_generation, _game_thread, _game_stop_event
+    global _current_queue, _game_thread, _game_stop_event
     # Signal old game to stop
     _game_stop_event.set()
-    # Bump generation so old events are filtered out
-    _game_generation += 1
+    # Create a NEW queue for the new game — old thread's events go to old queue
+    _current_queue = queue.Queue()
     # Resolve any pending human input so old thread can exit
     human = _session.get("human")
     if human and human._pending_future and not human._pending_future.done():
         human._pending_future.set_result("")
-    # Wait briefly for old thread to notice and exit
-    old_thread = _game_thread
-    if old_thread and old_thread.is_alive():
-        old_thread.join(timeout=2)
     # Create fresh stop event for new game
     _game_stop_event = threading.Event()
     _session.update(running=False, mode=None, human=None, agents=[])
@@ -124,29 +129,21 @@ def reset():
     return jsonify({"status": "ok"})
 
 
-def _emit(t, d):
-    """Emit a game event to the SSE queue."""
-    game_events.put({"type": t, "data": d})
-
-
-def emit_event(event_type, data):
-    """Public emit function (used by game.py and agent.py)."""
-    game_events.put({"type": event_type, "data": data})
-
-
 def _run_god_game():
     import asyncio
     from agent import PlayerAgent
     from game import werewolves_game
     import game as gm
     import agent as ag
-    gm._emit_web_event = _emit
-    ag._emit_web = _emit
+    # Capture this game's queue — old games write to their own (now dead) queue
+    my_emit = _make_emit(_current_queue)
+    gm._emit_web_event = my_emit
+    ag._emit_web = my_emit
     agents = [PlayerAgent(f"Player{i}") for i in range(1, 10)]
     _session["agents"] = agents
     # Init event is emitted by game.py after role assignment (with correct roles)
     asyncio.run(werewolves_game(agents))
-    _emit("done", {})
+    my_emit("done", {})
     _session["running"] = False
 
 
@@ -157,8 +154,9 @@ def _run_player_game(role_choice):
     from web_human import WebHumanAgent
     import game as gm
     import agent as ag
-    gm._emit_web_event = _emit
-    ag._emit_web = _emit
+    my_emit = _make_emit(_current_queue)
+    gm._emit_web_event = my_emit
+    ag._emit_web = my_emit
 
     roles = ["werewolf"] * 3 + ["villager"] * 3 + ["seer", "witch", "hunter"]
     random.shuffle(roles)
@@ -189,18 +187,18 @@ def _run_player_game(role_choice):
 
     _session.update(running=True, mode="player", human=human, agents=all_agents)
     # Emit init WITHOUT roles (player mode: hide roles)
-    _emit("init", {"players": [{"name": a.name, "role": "???", "camp": "???"}
+    my_emit("init", {"players": [{"name": a.name, "role": "???", "camp": "???"}
                                 for a in all_agents], "my_role": human_role})
     asyncio.run(werewolves_game(all_agents))
     # Reveal all roles at end
-    _emit("reveal", {"players": [{"name": a.name, "role": a.state.get("role", "?"),
+    my_emit("reveal", {"players": [{"name": a.name, "role": a.state.get("role", "?"),
                                    "camp": a.state.get("camp", "?")} for a in all_agents]})
-    _emit("done", {})
+    my_emit("done", {})
     _session["running"] = False
 
 
 def emit_event(event_type, data):
-    game_events.put({"type": event_type, "data": data})
+    _current_queue.put({"type": event_type, "data": data})
 
 
 if __name__ == "__main__":
