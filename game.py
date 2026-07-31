@@ -253,37 +253,54 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
         )
 
     # Assign roles to the agents
-    roles = ["werewolf"] * 3 + ["villager"] * 3 + ["seer", "witch", "hunter"]
-    np.random.shuffle(agents)
-    np.random.shuffle(roles)
-    all_player_names = [agent.name for agent in agents]
+    # Check if roles are already pre-assigned (player mode)
+    pre_assigned = all(
+        hasattr(a, 'state') and isinstance(a.state, dict) and a.state.get("role")
+        for a in agents
+    )
 
-    # Build complete name_to_role BEFORE assigning to agents
-    name_to_role = {}
-    for agent, role in zip(agents, roles):
-        name_to_role[agent.name] = role
+    if pre_assigned:
+        # Player mode: roles pre-assigned by _run_player_game, don't shuffle
+        all_player_names = [agent.name for agent in agents]
+        name_to_role = {a.name: a.state["role"] for a in agents}
+        for agent in agents:
+            role = agent.state["role"]
+            await agent.observe(
+                await moderator(
+                    f"[{agent.name} ONLY] {agent.name}, your role is {role}.",
+                ),
+            )
+            players.add_player(agent, role)
+            agent.state["name_to_role"] = deepcopy(name_to_role)
+            agent.state["current_alive"] = all_player_names.copy()
+    else:
+        # God mode: shuffle and assign randomly
+        roles = ["werewolf"] * 3 + ["villager"] * 3 + ["seer", "witch", "hunter"]
+        np.random.shuffle(agents)
+        np.random.shuffle(roles)
+        all_player_names = [agent.name for agent in agents]
 
-    for agent, role in zip(agents, roles):
-        # 初始化玩家state（确保非空）
-        if not hasattr(agent, 'state') or agent.state is None:
-            agent.state = {}
+        name_to_role = {}
+        for agent, role in zip(agents, roles):
+            name_to_role[agent.name] = role
 
-        # Tell the agent its role
-        await agent.observe(
-            await moderator(
-                f"[{agent.name} ONLY] {agent.name}, your role is {role}.",
-            ),
-        )
-        players.add_player(agent, role)
+        for agent, role in zip(agents, roles):
+            if not hasattr(agent, 'state') or agent.state is None:
+                agent.state = {}
 
-        # All agents get the FULL name_to_role mapping
-        agent.state["name_to_role"] = deepcopy(name_to_role)
-        agent.state["current_alive"] = all_player_names.copy()
-        # 补充阵营字段（根据角色自动分配）
-        if role == "werewolf":
-            agent.state["camp"] = "werewolf"
-        else:
-            agent.state["camp"] = "villager"
+            await agent.observe(
+                await moderator(
+                    f"[{agent.name} ONLY] {agent.name}, your role is {role}.",
+                ),
+            )
+            players.add_player(agent, role)
+
+            agent.state["name_to_role"] = deepcopy(name_to_role)
+            agent.state["current_alive"] = all_player_names.copy()
+            if role == "werewolf":
+                agent.state["camp"] = "werewolf"
+            else:
+                agent.state["camp"] = "villager"
 
     async with MsgHub(participants=agents) as init_hub:
         alive_str = names_to_str(all_player_names)
@@ -306,11 +323,13 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
     print("\n开始正式狼人杀游戏！")
 
     # GAME BEGIN!
-    _emit_web_event("init", {
-        "players": [{"name": a.name, "role": a.state.get("role", "?"),
-                      "camp": a.state.get("camp", "?")}
-                     for a in agents]
-    })
+    # Player mode: init already emitted by server with hidden roles — skip
+    if not pre_assigned:
+        _emit_web_event("init", {
+            "players": [{"name": a.name, "role": a.state.get("role", "?"),
+                          "camp": a.state.get("camp", "?")}
+                         for a in agents]
+        })
     for round_idx in range(MAX_GAME_ROUND):
         # Check if game was stopped (new game started in web UI)
         if _game_stop_event.is_set():
