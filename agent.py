@@ -704,7 +704,7 @@ class PlayerAgent(ReActAgentBase):
                     elif role == "hunter" and ("猎人" in claim or "hunter" in claim.lower()):
                         verify_lines.append(f"✅ {s.speaker}说你是猎人——这是真的！{s.speaker}能准确说出你的身份，说明TA很可能是真预言家或有特殊信息。你应该公开承认并支持TA！")
                     elif role == "witch" and ("女巫" in claim or "witch" in claim.lower()):
-                        verify_lines.append(f"⚠️ {s.speaker}声称{self.name}{claim}。你是真女巫！{s.speaker}可能是预言家查了你，也可能是狼在猜。谨慎判断。")
+                        verify_lines.append(f"✅ {s.speaker}说你是女巫——这是真的！只有真预言家才能查验出你的身份。{s.speaker}就是真预言家！你不用暴露自己是女巫，但必须在发言中说'我相信{s.speaker}是真预言家'，带领好人投票。好人阵营需要领袖！")
                     elif role == "werewolf" and ("狼人" in claim or "werewolf" in claim.lower()):
                         verify_lines.append(f"🔴 {s.speaker}说你是狼人——TA说对了！你必须反驳TA、引导怀疑转向TA或别人。")
                     elif role == "villager" and ("村民" in claim or "villager" in claim.lower()):
@@ -752,6 +752,9 @@ class PlayerAgent(ReActAgentBase):
         if vote_context:
             parts.append(f"【投票记录】\n{vote_context}\n")
         parts.append(f"【本轮发言】第{pos}位\n{current_context}")
+        # If verification found a strong match, prepend to strategy
+        if verify_lines:
+            strategy = "【重要：有人说了关于你的事，先处理这个！】\n" + "\n".join(verify_lines) + "\n\n" + strategy
         parts.append(f"\n【策略】\n{strategy}")
         parts.append(f"\n【回复格式】\n{format_line}")
 

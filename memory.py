@@ -284,6 +284,12 @@ def extract_speech_facts(speaker: str, content: str) -> SpeechSummary:
     For the remaining 20%, stores the first sentence as key_point.
     """
     import re
+    # Normalize Chinese player references to PlayerN format
+    content = re.sub(r'(\d+)号玩家', r'Player\1', content)
+    content = re.sub(r'(?<!\w)(\d+)号(?!玩家)', r'Player\1', content)
+    # Normalize "结果为【女巫】" or "结果是女巫" → "是女巫"
+    content = re.sub(r'结果\s*(?:是|为)\s*[：:【\[\s]*\s*(预言家|女巫|猎人|村民|狼人)\s*[】\]\s]*', r'是\1', content)
+    content = re.sub(r'身份\s*(?:是|为)\s*[：:【\[\s]*\s*(预言家|女巫|猎人|村民|狼人)\s*[】\]\s]*', r'是\1', content)
     s = SpeechSummary(speaker=speaker, round_num=0)
 
     # Accusations: "怀疑PlayerX", "PlayerX很可疑", "PlayerX是狼"
@@ -319,7 +325,7 @@ def extract_speech_facts(speaker: str, content: str) -> SpeechSummary:
     # Reported claims about OTHERS: "PlayerX自称预言家", "PlayerX跳了预言家"
     # These may be FALSE — the speaker could be lying or mistaken
     for m in re.finditer(
-        r'(Player\d)\s*(?:自称|声称|跳了?|说自己是|是)\s*(预言家|女巫|猎人|村民|狼人)',
+        r'(Player\d)[，,\s]*(?:自称|声称|跳了?|说自己是|是|身份是|结果为|结果是)\s*(预言家|女巫|猎人|村民|狼人)',
         content
     ):
         target = m.group(1)
