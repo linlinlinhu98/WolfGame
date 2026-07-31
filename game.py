@@ -256,14 +256,18 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
     roles = ["werewolf"] * 3 + ["villager"] * 3 + ["seer", "witch", "hunter"]
     np.random.shuffle(agents)
     np.random.shuffle(roles)
-    name_to_role = {}
     all_player_names = [agent.name for agent in agents]
+
+    # Build complete name_to_role BEFORE assigning to agents
+    name_to_role = {}
+    for agent, role in zip(agents, roles):
+        name_to_role[agent.name] = role
 
     for agent, role in zip(agents, roles):
         # 初始化玩家state（确保非空）
         if not hasattr(agent, 'state') or agent.state is None:
             agent.state = {}
-        
+
         # Tell the agent its role
         await agent.observe(
             await moderator(
@@ -271,10 +275,8 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
             ),
         )
         players.add_player(agent, role)
-        # 记录映射关系
-        name_to_role[agent.name] = role
 
-        # 同步映射表和存活状态到所有玩家的 state 中
+        # All agents get the FULL name_to_role mapping
         agent.state["name_to_role"] = deepcopy(name_to_role)
         agent.state["current_alive"] = all_player_names.copy()
         # 补充阵营字段（根据角色自动分配）

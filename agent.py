@@ -652,6 +652,8 @@ class PlayerAgent(ReActAgentBase):
                     past_lines.append(f"第{r}轮: {line}")
             if past_lines:
                 past_context = "\n".join(past_lines)
+            elif wm.round_num <= 1:
+                past_context = "（这是第1轮，还没有前几轮的发言和投票记录。不要编造不存在的历史！）"
 
         # Vote history for pattern analysis
         vote_entries = [e for e in self.memory.entries if e.type == EntryType.VOTE]
