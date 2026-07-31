@@ -790,7 +790,11 @@ class PlayerAgent(ReActAgentBase):
             parts.append(f"\n【‼️ 发布前必须检查：有人说了关于你的话，你私下知道真假！】")
             parts.extend(verify_lines)
             parts.append("你在回复中必须处理以上信息。如果是真的→公开确认。如果是假的→公开揭穿。不能沉默！")
-        parts.append(f"\n【回复格式】\n{format_line}")
+        # Dead player warning at the VERY END (can't miss)
+        dead_warn_end = ""
+        if wm.dead_players:
+            dead_warn_end = f"\n⚠️ 已死玩家: {', '.join(wm.dead_players)}。你绝对不能投已死的人！只能投存活玩家。"
+        parts.append(f"\n【回复格式】\n{format_line}{dead_warn_end}")
 
         return "\n".join(parts)
 
