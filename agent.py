@@ -398,7 +398,7 @@ class PlayerAgent(ReActAgentBase):
     async def _decide(self, mode: str) -> Dict[str, Any]:
         """LLM tactical decision — first reasons, then decides."""
         prompt = self._build_decision_prompt(mode)
-        text = await self._llm(prompt, max_t=400, temp=0.7)
+        text = await self._llm(prompt, max_t=600, temp=0.7)
         # Split reasoning and decision
         reasoning, decision = self._split_reasoning(text)
         if reasoning:
@@ -433,7 +433,7 @@ class PlayerAgent(ReActAgentBase):
     async def _discuss(self, is_last_words: bool = False) -> Dict[str, Any]:
         """Two-pass discussion: internal reasoning → public speech."""
         prompt = self._build_discussion_prompt(is_last_words)
-        text = await self._llm(prompt, max_t=800, temp=0.9)
+        text = await self._llm(prompt, max_t=1500, temp=0.9)
         if not text or len(text) < 10:
             print(f"[{self.name}] WARNING: LLM empty, using fallback")
             return self._fallback_plan()
@@ -500,7 +500,7 @@ class PlayerAgent(ReActAgentBase):
         forbid_block = "\n".join(f"❌ {f}" for f in forbid) if forbid else ""
 
         # ── Summaries ──
-        summaries = format_speech_summaries(self._speech_summaries, max_per_round=8)
+        summaries = format_speech_summaries(self._speech_summaries, max_per_round=20)
         if not summaries.strip():
             summaries = "暂无讨论"
 
@@ -668,7 +668,7 @@ class PlayerAgent(ReActAgentBase):
                 if line:
                     past_lines.append(f"第{r}轮: {line}")
             if past_lines:
-                past_context = "\n".join(past_lines[-3:])
+                past_context = "\n".join(past_lines[-5:])
 
         # Vote history
         vote_entries = [e for e in self.memory.entries if e.type == EntryType.VOTE]
@@ -682,7 +682,7 @@ class PlayerAgent(ReActAgentBase):
                 voters = [f"{v.speaker}→{v.content[:20]}" for v in by_rnd[r]]
                 vl.append(f"第{r}轮投票: {', '.join(voters)}")
             if vl:
-                vote_context = "\n".join(vl[-3:])
+                vote_context = "\n".join(vl[-5:])
 
         # ═══════════════════════════════════════════
         # SECTION 3: STRATEGY + FORMAT (at end — recency)

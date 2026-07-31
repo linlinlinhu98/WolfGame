@@ -350,12 +350,8 @@ def extract_speech_facts(speaker: str, content: str) -> SpeechSummary:
     return s
 
 
-def format_speech_summaries(summaries: List[SpeechSummary], max_per_round: int = 8) -> str:
-    """Format speech summaries as standalone sentences with clear subject.
-
-    Each fact is a complete sentence like 'Player5自称预言家。Player5怀疑Player2。'
-    This prevents the LLM from confusing who said what about whom.
-    """
+def format_speech_summaries(summaries: List[SpeechSummary], max_per_round: int = 15) -> str:
+    """Format speech summaries with key reasoning preserved."""
     if not summaries:
         return "（暂无发言记录）"
 
@@ -373,9 +369,13 @@ def format_speech_summaries(summaries: List[SpeechSummary], max_per_round: int =
                 facts.append(f"{s.speaker}说{d}是好人。")
         if s.reported:
             for r in s.reported:
-                facts.append(f"{s.speaker}声称:{r}。（未经证实）")
+                facts.append(f"{s.speaker}声称:{r}。")
         if s.vote_hint:
-            facts.append(f"{s.speaker}要投票给{s.vote_hint}。")
+            facts.append(f"{s.speaker}要投{s.vote_hint}。")
+        # Always include key_point for reasoning context
+        if s.key_point and len(s.key_point) > 10:
+            kp = s.key_point[:120]
+            facts.append(f"「{kp}」")
         if not facts:
             facts.append(f"{s.speaker}: {s.key_point}")
         lines.append(" ".join(facts))
@@ -383,7 +383,7 @@ def format_speech_summaries(summaries: List[SpeechSummary], max_per_round: int =
 
 
 def format_round_summary(summaries: List[SpeechSummary]) -> str:
-    """Compact round summary with clear subject-verb-object sentences."""
+    """Round summary preserving key accusations and claims."""
     if not summaries:
         return ""
     facts = []
@@ -398,4 +398,8 @@ def format_round_summary(summaries: List[SpeechSummary]) -> str:
             facts.append(f"{s.speaker}称{r}")
         if s.vote_hint:
             facts.append(f"{s.speaker}要投{s.vote_hint}")
+        if s.key_point and len(s.key_point) > 15:
+            facts.append(f"{s.speaker}说「{s.key_point[:80]}」")
     return "；".join(facts) if facts else ""
+
+
