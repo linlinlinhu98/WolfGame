@@ -252,7 +252,13 @@ function buildHint() {
     if (ph === "discussion") return "轮到你发言了";
     if (ph === "voting") return "选择你要投票淘汰的玩家";
     if (r === "werewolf") return `选择击杀目标 | 队友: ${(ctx.teammates||[]).join(", ")||"无"}`;
-    if (r === "witch") { const h=ctx.healing_used?"已用":"可用", p=ctx.poison_used?"已用":"可用"; return `女巫 | 解药:${h} 毒药:${p} | 今晚 ${ctx.night_killed||"?"} 被杀`; }
+    if (r === "witch") {
+        const h=ctx.healing_used?"已用":"可用", p=ctx.poison_used?"已用":"可用";
+        const stage = ctx.witch_stage || "";
+        if (stage === "resurrect") return `女巫 | 解药:${h} | 今晚 ${ctx.night_killed||"?"} 被杀。要救吗？`;
+        if (stage === "poison") return `女巫 | 毒药:${p} | 要毒谁？`;
+        return `女巫 | 解药:${h} 毒药:${p} | 今晚 ${ctx.night_killed||"?"} 被杀`;
+    }
     if (r === "seer") { const s=Object.entries(ctx.seer_checks||{}).map(([n,r])=>`${n}=${roleLabel(r)}`).join(", ")||"无"; return `预言家 | 已查: ${s}`; }
     if (r === "hunter") return "你被淘汰，可带走一人或放弃"; return "";
 }
@@ -264,14 +270,59 @@ function buildActionBtns() {
     const div = document.getElementById("actionButtons"); div.innerHTML = "";
     const alive = Object.entries(gs.players).filter(([n,i])=>i.alive&&n!==myName).map(([n])=>n);
     const r = ctx.role||myRole;
-    if (r==="werewolf") { const mates=new Set(ctx.teammates||[]); alive.filter(n=>!mates.has(n)).forEach(n=>{const b=document.createElement("button");b.className="abtn kill";b.textContent="🔪 "+n;b.onclick=()=>send(n);div.appendChild(b);}); }
-    else if (r==="seer") alive.forEach(n=>{const b=document.createElement("button");b.className="abtn";b.textContent="🔍 "+n;b.onclick=()=>send(n);div.appendChild(b);});
-    else if (r==="witch") {
-        if(!ctx.healing_used&&ctx.night_killed&&ctx.night_killed!==myName){const hb=document.createElement("button");hb.className="abtn heal";hb.textContent="💚 救 "+ctx.night_killed;hb.onclick=()=>send("resurrect");div.appendChild(hb);}
-        alive.forEach(n=>{const b=document.createElement("button");b.className="abtn poison";b.textContent="☠️ 毒 "+n;b.onclick=()=>send("poison:"+n);div.appendChild(b);});
-        const nb=document.createElement("button");nb.className="abtn";nb.textContent="跳过";nb.onclick=()=>send("none");div.appendChild(nb);
+    if (r==="werewolf") {
+        const mates=new Set(ctx.teammates||[]);
+        alive.filter(n=>!mates.has(n)).forEach(n=>{
+            const b=document.createElement("button");b.className="abtn kill";
+            b.textContent="🔪 "+n;b.onclick=()=>send(n);div.appendChild(b);
+        });
     }
-    else if (r==="hunter") { alive.forEach(n=>{const b=document.createElement("button");b.className="abtn";b.textContent="🎯 "+n;b.onclick=()=>send(n);div.appendChild(b);}); const nb=document.createElement("button");nb.className="abtn";nb.textContent="放弃";nb.onclick=()=>send("none");div.appendChild(nb); }
+    else if (r==="seer") {
+        alive.forEach(n=>{const b=document.createElement("button");b.className="abtn";
+            b.textContent="🔍 "+n;b.onclick=()=>send(n);div.appendChild(b);});
+    }
+    else if (r==="witch") {
+        const stage = ctx.witch_stage || "";
+        if (stage === "resurrect") {
+            // Step 1: Heal or skip
+            if (!ctx.healing_used && ctx.night_killed && ctx.night_killed !== myName) {
+                const hb = document.createElement("button"); hb.className = "abtn heal";
+                hb.textContent = "💚 救 " + ctx.night_killed;
+                hb.onclick = () => send("resurrect"); div.appendChild(hb);
+            }
+            const nb = document.createElement("button"); nb.className = "abtn";
+            nb.textContent = "不救"; nb.onclick = () => send("none"); div.appendChild(nb);
+        } else if (stage === "poison") {
+            // Step 2: Poison someone or skip
+            alive.forEach(n => {
+                const b = document.createElement("button"); b.className = "abtn poison";
+                b.textContent = "☠️ 毒 " + n;
+                b.onclick = () => send("poison:" + n); div.appendChild(b);
+            });
+            const nb = document.createElement("button"); nb.className = "abtn";
+            nb.textContent = "不用毒"; nb.onclick = () => send("none"); div.appendChild(nb);
+        } else {
+            // Fallback: show both (shouldn't happen normally)
+            if (!ctx.healing_used && ctx.night_killed && ctx.night_killed !== myName) {
+                const hb = document.createElement("button"); hb.className = "abtn heal";
+                hb.textContent = "💚 救 " + ctx.night_killed;
+                hb.onclick = () => send("resurrect"); div.appendChild(hb);
+            }
+            alive.forEach(n => {
+                const b = document.createElement("button"); b.className = "abtn poison";
+                b.textContent = "☠️ 毒 " + n;
+                b.onclick = () => send("poison:" + n); div.appendChild(b);
+            });
+            const nb = document.createElement("button"); nb.className = "abtn";
+            nb.textContent = "跳过"; nb.onclick = () => send("none"); div.appendChild(nb);
+        }
+    }
+    else if (r==="hunter") {
+        alive.forEach(n=>{const b=document.createElement("button");b.className="abtn";
+            b.textContent="🎯 "+n;b.onclick=()=>send(n);div.appendChild(b);});
+        const nb=document.createElement("button");nb.className="abtn";
+        nb.textContent="放弃";nb.onclick=()=>send("none");div.appendChild(nb);
+    }
 }
 function submitSpeech() { const box=document.getElementById("speechBox"); const t=box.value.trim(); if(t){send(t);box.value="";} }
 document.addEventListener("keydown", e => { if(e.key==="Enter"&&document.activeElement.id==="speechBox") submitSpeech(); });

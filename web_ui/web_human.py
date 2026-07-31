@@ -40,7 +40,7 @@ class WebHumanAgent(PlayerAgent):
         if self._pending_future and not self._pending_future.done():
             self._pending_future.set_result(text)
 
-    def update_public_info(self):
+    def update_public_info(self, msg_content: str = ""):
         wm = self.wm
         info = {
             "role": wm.my_role, "camp": wm.my_camp,
@@ -52,6 +52,12 @@ class WebHumanAgent(PlayerAgent):
             "poison_used": wm.poison_used,
             "seer_checks": dict(wm.seer_checks),
         }
+        # Detect witch stage from prompt content
+        if wm.my_role == "witch" and wm.phase == "night":
+            if "resurrect" in msg_content.lower() or "救" in msg_content or "解药" in msg_content:
+                info["witch_stage"] = "resurrect"
+            elif "poison" in msg_content.lower() or "毒药" in msg_content or "毒杀" in msg_content:
+                info["witch_stage"] = "poison"
         # Add teammate info for werewolves
         if wm.my_role == "werewolf":
             info["teammates"] = [p for p in wm.alive_players
@@ -64,9 +70,11 @@ class WebHumanAgent(PlayerAgent):
     async def __call__(
         self, msg: Msg | None = None, *, structured_model: Any = None, **kw
     ) -> Msg:
+        msg_text = ""
         if msg is not None:
+            msg_text = (msg.content or "") if hasattr(msg, 'content') else str(msg)
             await self._perceive(msg)
-        self.update_public_info()
+        self.update_public_info(msg_text)
 
         wm = self.wm
         if not wm.my_role:
