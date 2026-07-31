@@ -31,9 +31,7 @@ def stream():
         while True:
             try:
                 event = game_events.get(timeout=30)
-                # Filter out events from old game generations
-                if event.get("_gen", 0) >= _game_generation:
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except queue.Empty:
                 yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
     return Response(event_stream(), mimetype="text/event-stream",
@@ -127,13 +125,13 @@ def reset():
 
 
 def _emit(t, d):
-    """Emit a game event tagged with current generation."""
-    game_events.put({"type": t, "data": d, "_gen": _game_generation})
+    """Emit a game event to the SSE queue."""
+    game_events.put({"type": t, "data": d})
 
 
 def emit_event(event_type, data):
     """Public emit function (used by game.py and agent.py)."""
-    game_events.put({"type": event_type, "data": data, "_gen": _game_generation})
+    game_events.put({"type": event_type, "data": data})
 
 
 def _run_god_game():
