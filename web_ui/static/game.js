@@ -215,7 +215,9 @@ function showInput() {
     area.scrollIntoView({ behavior: "smooth" });
     document.getElementById("turnIndicator").style.display = "";
     document.getElementById("actionHint").innerHTML = buildHint();
-    const ph = gs.phase; const dead = gs.players[myName] && !gs.players[myName].alive;
+    // Use server's phase (ctx.phase) — more reliable than SSE gs.phase
+    const ph = ctx.phase || gs.phase;
+    const dead = gs.players[myName] && !gs.players[myName].alive;
     document.getElementById("speechInput").style.display = (ph === "discussion" || dead) ? "" : "none";
     document.getElementById("voteInput").style.display = ph === "voting" ? "" : "none";
     document.getElementById("actionInput").style.display = ph === "night" ? "" : "none";
