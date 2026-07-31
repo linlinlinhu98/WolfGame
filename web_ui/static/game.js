@@ -76,7 +76,7 @@ function showGame(badge) {
     document.getElementById("myId").textContent = mode === "player" ? "你是 " + myName : "";
     // Render 9 placeholder cards immediately
     renderPlaceholders();
-    if (mode === "player") setInterval(checkTurn, 500);
+    if (mode === "player") setInterval(checkTurn, 250);
 }
 function renderPlaceholders() {
     const grid = document.getElementById("playerGrid");
@@ -326,7 +326,12 @@ function buildActionBtns() {
 }
 function submitSpeech() { const box=document.getElementById("speechBox"); const t=box.value.trim(); if(t){send(t);box.value="";} }
 document.addEventListener("keydown", e => { if(e.key==="Enter"&&document.activeElement.id==="speechBox") submitSpeech(); });
-function send(text) { fetch("/api/player_input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})}); hideInput(); }
+async function send(text) {
+    await fetch("/api/player_input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+    hideInput();
+    // Immediately check if there's a follow-up prompt (witch step 2, etc.)
+    setTimeout(checkTurn, 100);
+}
 
 function renderPlayers() {
     const grid = document.getElementById("playerGrid");
