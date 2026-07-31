@@ -661,6 +661,7 @@ class PlayerAgent(ReActAgentBase):
         if wm.round_num <= 1:
             lines.append("⚠️ 这是第1轮，没有历史发言。不要编造'前几轮''之前他说过'等内容！")
         lines.append("⚠️ 不要声称别人投了谁——除非你在投票记录里亲眼看到。不要说'X投了自己'除非你真的看到投票记录。")
+        lines.append("⚠️ 如果有人自称预言家并给出查验结果（'PlayerX是狼人/好人'），不要直接否定说'没有依据'——查验本身就是依据！考虑TA可能是真预言家的可能性。观察有没有人能验证这个说法。")
 
         # ═══════════════════════════════════════════
         # SECTION 2: CONTEXT (summaries, votes)
