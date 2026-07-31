@@ -31,14 +31,20 @@ class WebHumanAgent(PlayerAgent):
     async def _wait_for_input(self) -> str:
         """Create a future and wait for the server to resolve it."""
         self._pending_future = asyncio.Future()
+        self._event_loop = asyncio.get_running_loop()
         result = await self._pending_future
         self._pending_future = None
         return result
 
     def submit_input(self, text: str) -> None:
-        """Called by Flask server when user submits."""
+        """Called by Flask server when user submits (from another thread!)."""
         if self._pending_future and not self._pending_future.done():
-            self._pending_future.set_result(text)
+            # Must use call_soon_threadsafe — Future.set_result is NOT thread-safe
+            loop = getattr(self, '_event_loop', None)
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(self._pending_future.set_result, text)
+            else:
+                self._pending_future.set_result(text)  # Fallback for same-thread
 
     def update_public_info(self, msg_content: str = ""):
         wm = self.wm
