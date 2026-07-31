@@ -74,7 +74,19 @@ function showGame(badge) {
     document.getElementById("game").style.display = "";
     document.getElementById("modeBadge").textContent = badge;
     document.getElementById("myId").textContent = mode === "player" ? "你是 " + myName : "";
+    // Render 9 placeholder cards immediately
+    renderPlaceholders();
     if (mode === "player") setInterval(checkTurn, 500);
+}
+function renderPlaceholders() {
+    const grid = document.getElementById("playerGrid");
+    grid.innerHTML = "";
+    for (let i = 1; i <= 9; i++) {
+        const c = document.createElement("div");
+        c.className = "pcard"; c.id = "pcard-Player" + i;
+        c.innerHTML = `<div class="pname">Player${i}</div><div class="pstatus">等待中</div><div class="prole">???</div>`;
+        grid.appendChild(c);
+    }
 }
 
 // SSE handler
@@ -238,13 +250,16 @@ document.addEventListener("keydown", e => { if(e.key==="Enter"&&document.activeE
 function send(text) { fetch("/api/player_input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})}); hideInput(); }
 
 function renderPlayers() {
-    const grid = document.getElementById("playerGrid"); grid.innerHTML = "";
     Object.entries(gs.players).forEach(([n,i]) => {
-        const c = document.createElement("div"); c.className = "pcard" + (i.alive ? "" : " dead");
+        let c = document.getElementById("pcard-" + n);
+        if (!c) {
+            c = document.createElement("div"); c.id = "pcard-" + n;
+            document.getElementById("playerGrid").appendChild(c);
+        }
+        c.className = "pcard" + (i.alive ? "" : " dead");
         const showRole = mode === "god" || (mode === "player" && (n === myName || !i.alive));
         const you = (mode === "player" && n === myName) ? " (你)" : "";
         c.innerHTML = `<div class="pname">${n}${you}</div><div class="pstatus">${i.alive?"存活":"死亡"}</div><div class="prole">${showRole&&i.role!=="???"?roleLabel(i.role):"???"}</div>`;
-        grid.appendChild(c);
     });
 }
 function addLog(id, html) {
