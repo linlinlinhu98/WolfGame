@@ -107,15 +107,15 @@ def _clear_events():
 def _stop_old_game():
     """Stop any running game before starting a new one."""
     global _current_queue, _game_thread, _game_stop_event
-    # Signal old game to stop
     _game_stop_event.set()
-    # Create a NEW queue for the new game — old thread's events go to old queue
+    # Unblock SSE handler: put sentinel in old queue, then replace with new queue
+    old_queue = _current_queue
     _current_queue = queue.Queue()
-    # Resolve any pending human input so old thread can exit
+    old_queue.put({"type": "_wake", "data": {}})  # Unblocks old get() call
+    # Resolve pending human input
     human = _session.get("human")
     if human and human._pending_future and not human._pending_future.done():
         human._pending_future.set_result("")
-    # Create fresh stop event for new game
     _game_stop_event = threading.Event()
     _session.update(running=False, mode=None, human=None, agents=[])
     _game_thread = None
@@ -141,9 +141,6 @@ def _run_god_game():
     ag._emit_web = my_emit
     agents = [PlayerAgent(f"Player{i}") for i in range(1, 10)]
     _session["agents"] = agents
-    # Wait for SSE connection to establish before emitting events
-    import time
-    time.sleep(1)
     # Init event is emitted by game.py after role assignment (with correct roles)
     asyncio.run(werewolves_game(agents))
     my_emit("done", {})

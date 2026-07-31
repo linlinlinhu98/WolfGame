@@ -177,6 +177,9 @@ function handle(msg) {
         case "done":
             document.getElementById("phaseLabel").textContent = "结束";
             document.getElementById("inputArea").style.display = "none"; break;
+        case "_wake":
+            // SSE internal: queue switch sentinel, ignore
+            break;
         case "reset":
             // Backend session was reset
             document.getElementById("phaseLabel").textContent = "已重置";
