@@ -653,6 +653,21 @@ class PlayerAgent(ReActAgentBase):
             if past_lines:
                 past_context = "\n".join(past_lines)
 
+        # Vote history for pattern analysis
+        vote_entries = [e for e in self.memory.entries if e.type == EntryType.VOTE]
+        vote_context = ""
+        if len(vote_entries) >= 2:
+            # Group votes by round
+            by_rnd: dict[int, list] = {}
+            for e in vote_entries:
+                by_rnd.setdefault(e.round_num, []).append(e)
+            vote_lines = []
+            for r in sorted(by_rnd.keys()):
+                voters = [f"{v.speaker}→{v.content[:30]}" for v in by_rnd[r]]
+                vote_lines.append(f"第{r}轮投票: {', '.join(voters)}")
+            if vote_lines:
+                vote_context = "\n".join(vote_lines[-3:])  # Last 3 rounds
+
         # Known facts (verifiable from memory)
         n_total = 9
         n_alive = wm.n_alive
@@ -740,7 +755,8 @@ class PlayerAgent(ReActAgentBase):
             f"【你的性格】{self.persona.to_prompt()}\n{self._strategy_hint()}\n"
             f"{last_note}\n"
             f"【前几轮摘要】\n{past_context}\n\n"
-            f"【本轮之前发言】\n{current_context}\n\n"
+            + (f"【投票记录】\n{vote_context}\n\n" if vote_context else "")
+            + f"【本轮之前发言】\n{current_context}\n\n"
             f"{suspect_context}"
             f"【你的怀疑度】\n{self.bt.get_belief_summary(alive) if self.bt else '暂无'}\n\n"
             f"【认知边界】\n"
@@ -754,8 +770,17 @@ class PlayerAgent(ReActAgentBase):
             f"如无线索: 排除你信任的人，从剩余存活着中随机指一个，说明是随机选择。\n"
             f"无论哪种情况都必须说投谁。发言60-150字。\n"
             f"{deception_rules}\n\n"
-            f"格式:\n"
-            f"内部: (作为{role}，一句话策略)\n公开: (你的发言)"
+            + (
+                # Seer with wolf check: FORCE public reveal
+                f"🔴 你是预言家，你已查验出狼人！你的公开发言必须以'我是预言家'开头，"
+                f"直接说出查验结果！格式:\n"
+                f"内部: (我要跳身份)\n"
+                f"公开: 我是预言家，第1晚查了PlayerX是狼人！所有人跟我投票出PlayerX！\n"
+                if role == "seer" and any(r == "werewolf" for r in wm.seer_checks.values())
+                else (
+                    f"格式:\n内部: (作为{role}，一句话策略)\n公开: (你的发言)"
+                )
+            )
         )
 
     def _strategy_hint(self) -> str:
@@ -769,22 +794,37 @@ class PlayerAgent(ReActAgentBase):
                 "策略: 伪装村民视角发言，怀疑好人、保护队友。\n"
                 "投票时: 投你发言中怀疑的人，保持言行一致不暴露。"
             )
-            return (
+            # Check if seer has found a wolf
+            has_wolf_check = any(r == "werewolf" for r in self.wm.seer_checks.values())
+            wolf_names = [n for n, r in self.wm.seer_checks.items() if r == "werewolf"]
+            check_list = ", ".join(f"{n}={r}" for n, r in self.wm.seer_checks.items()) or "无"
+
+            base = (
                 "🎯 胜利条件: 所有狼人被淘汰（共3狼）。\n"
-                "【跳身份时机】\n"
-                "- 查到狼人 → 第2轮必须跳！说出查验历史+狼人是谁。\n"
-                "- 连续查到好人 → 第2-3轮可跳，建立好人信任网。\n"
-                "- 跳身份的风险: 当晚大概率被狼杀，但你的信息能帮好人赢。\n"
-                "【识别假预言家】\n"
-                "- 如果别人也自称预言家→他必然是狼/愚民。查验结果对比即可揭穿。\n"
-                "- 假预言家当晚没被刀→铁狼！因为真预言家是狼优先杀的目标。\n"
-                "【保护查证的好人】\n"
-                "- 查验到好人→在发言中为他辩护，引导投票远离他。\n"
-                "- 查验到狼人→坚决带队推他出局。\n"
-                "【发言模板】\n"
-                "跳身份: '我是预言家，第1晚查了PlayerX是好人/狼人...'\n"
-                "未跳: 以村民视角分析，暗中保护查证的好人。"
+                f"你的查验记录: {check_list}\n"
             )
+            if has_wolf_check:
+                base += (
+                    f"🔴 你已验证 {', '.join(wolf_names)} 是狼人！\n"
+                    "‼️ 本轮讨论必须跳身份！公开发言开头必须说:\n"
+                    f"'我是预言家，我查验了{', '.join(wolf_names)}是狼人！'\n"
+                    "然后带领好人投票出这个狼人。再不说就来不及了！\n"
+                )
+            else:
+                base += (
+                    "【跳身份时机】\n"
+                    "- 查到狼人 → 下一轮讨论必须立即跳！\n"
+                    "- 连续查到好人 → 第2-3轮可跳，建立信任网。\n"
+                    "- 跳身份风险: 当晚可能被狼杀，但信息能帮好人赢。\n"
+                    "【保护查证的好人】\n"
+                    "- 查验到好人→发言中为他辩护，引导投票远离他。\n"
+                )
+            base += (
+                "【识别假预言家】\n"
+                "- 别人也自称预言家→他必然是假货。用查验结果揭穿。\n"
+                "- 假预言家当晚没被刀→铁狼！真预言家是狼优先目标。\n"
+            )
+            return base
         elif role == "witch":
             return (
                 "🎯 胜利条件: 所有狼人被淘汰（共3狼）。\n"
@@ -806,11 +846,13 @@ class PlayerAgent(ReActAgentBase):
         elif role == "villager":
             return (
                 "🎯 胜利条件: 所有狼人被淘汰（共3狼）。\n"
-                "数值推理: 游戏继续→狼人未达半数。如果只剩4人→最多1只狼，不是3只！\n"
+                "数值推理: 游戏继续→狼人未达半数。只剩4人→最多1只狼！\n"
                 "你的武器是逻辑分析。用发言矛盾+投票记录+死亡信息推理。\n"
+                "【投票分析】看投票记录找规律：如果某几个人每轮都投同一个目标，\n"
+                "  他们很可能是狼团队在统一冲票。分散的投票更像好人。\n"
                 "❌ 严禁假跳: 绝不说'我是预言家''我是女巫''我是猎人'！\n"
                 "   你假跳神职=帮狼人混淆视听=毁掉好人阵营。\n"
-                "✅ 你应该: 分析发言中的矛盾，指出谁最可疑并解释为什么。\n"
+                "✅ 你应该: 分析发言矛盾+投票抱团，指出最可疑的人。\n"
                 "发言中: 指出具体怀疑对象+分析理由+声明投谁。\n"
                 "投票时: 投你发言中怀疑的人。言行必须一致！"
             )
