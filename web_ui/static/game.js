@@ -94,8 +94,16 @@ function handle(msg) {
     switch (msg.type) {
         case "init":
             gs.players = {}; (msg.data.players||[]).forEach(p => { gs.players[p.name] = { role: p.role, camp: p.camp, alive: true }; });
-            if (msg.data.my_role) { myRole = msg.data.my_role; document.getElementById("myId").textContent = "你是 " + myName + " · " + roleLabel(myRole); }
-            // Force full re-render: clear grid first, then rebuild all 9 cards
+            if (msg.data.my_role) {
+                myRole = msg.data.my_role;
+                document.getElementById("myId").textContent = "你是 " + (msg.data.my_name||"Player1") + " · " + roleLabel(myRole);
+            }
+            if (msg.data.my_name) myName = msg.data.my_name;
+            // Player mode: add the human player to gs.players since they're not in the AI list
+            if (mode === "player" && myName && !gs.players[myName]) {
+                gs.players[myName] = { role: myRole, camp: myRole === "werewolf" ? "werewolf" : "villager", alive: true };
+            }
+            // Force full re-render: clear grid first, then rebuild all cards
             document.getElementById("playerGrid").innerHTML = "";
             renderPlayers();
             break;
@@ -109,15 +117,17 @@ function handle(msg) {
                 addLog("dayLog", `<div class="round-hdr">☀️ 第${currentDay}天</div>`); }
             break;
         case "phase_log":
-            // Moderator prompts displayed in day/night panels
+            // In player mode, hide wolf-only discussions from non-wolves
             {
+                const text = msg.data.text || "";
+                const isWolfOnly = text.includes("仅狼人可见") || text.includes("WEREWOLVES ONLY");
+                if (mode === "player" && isWolfOnly && myRole !== "werewolf") break;
                 const panel = msg.data.panel === "night" ? "nightLog" : "dayLog";
                 const label = msg.data.label || "";
                 if (label) {
                     addLog(panel, `<div class="phase-label">【${label}】</div>`);
                 }
                 addLog(panel, `<div class="moderator-msg">📢 ${esc(msg.data.text)}</div>`);
-                // Show important labels in announceBar too
                 if (label === "天亮" || label === "遗言" || label === "投票结果") {
                     addLog("announceBar", `<span class="sys">${label}: ${esc(msg.data.text).substring(0,80)}</span>`);
                 }
@@ -145,7 +155,17 @@ function handle(msg) {
             break;
         case "night_action":
             addNightHeader(msg.data.round || currentNight);
-            {
+            // Player mode: only show own actions + public info (seer check, deaths)
+            if (mode === "player") {
+                if (msg.data.player === myName) {
+                    addLog("nightLog", `[你] ${msg.data.action}: ${msg.data.target||"无"}`);
+                }
+                // Wolf teammates see each other's proposals
+                if (myRole === "werewolf" && msg.data.player !== myName && msg.data.strategy === "kill") {
+                    addLog("wolfLog", `队友 ${msg.data.player} 选择击杀: ${msg.data.target||"无"}`);
+                }
+            } else {
+                // God mode: show all night actions
                 const act = msg.data.action || "行动";
                 const tgt = msg.data.target && msg.data.target !== "none" ? msg.data.target : "";
                 const s = msg.data.strategy || "";
@@ -157,15 +177,15 @@ function handle(msg) {
                 }
                 addLog("nightLog", line);
             }
-            if (mode === "player" && myRole === "werewolf" && msg.data.player !== myName)
-                addLog("wolfLog", `[${msg.data.player}] ${msg.data.action}: ${msg.data.target||"无"}`);
             break;
         case "seer_result":
-            // Show seer check result in night log (god mode)
-            addLog("nightLog", `<span class="sys">🔮 ${msg.data.target} 身份: ${roleLabel(msg.data.role)}</span>`);
+            // Player mode: only show to seer
+            if (mode === "god" || (mode === "player" && myRole === "seer"))
+                addLog("nightLog", `<span class="sys">🔮 ${msg.data.target} 身份: ${roleLabel(msg.data.role)}</span>`);
             break;
         case "wolf_proposal":
-            if (mode === "player" && myRole === "werewolf")
+            // Player mode: only visible to werewolves
+            if (mode === "god" || (mode === "player" && myRole === "werewolf"))
                 addLog("wolfLog", `队友 ${msg.data.player} 选择击杀: ${msg.data.target}`);
             break;
         case "game_over":

@@ -158,27 +158,33 @@ def _run_player_game(role_choice):
     gm._emit_web_event = my_emit
     ag._emit_web = my_emit
 
-    roles = ["werewolf"] * 3 + ["villager"] * 3 + ["seer", "witch", "hunter"]
-    random.shuffle(roles)
-    human_role = role_choice if role_choice in roles else roles.pop()
-    if human_role not in roles and human_role != role_choice:
-        roles.pop(roles.index(human_role)) if human_role in roles else None
+    # Prepare role pool (9 roles total)
+    role_pool = ["werewolf"] * 3 + ["villager"] * 3 + ["seer", "witch", "hunter"]
+    random.shuffle(role_pool)
 
+    # Ensure human gets their chosen role
+    if role_choice in role_pool:
+        role_pool.remove(role_choice)
+        human_role = role_choice
+    else:
+        human_role = role_pool.pop()
+
+    # Human is always Player1, gets human_role (no shuffle!)
     human = WebHumanAgent("Player1")
     ai_agents = [PlayerAgent(f"Player{i}") for i in range(2, 10)]
-    all_agents = [human] + ai_agents
     random.shuffle(ai_agents)
-    all_roles_list = [human_role] + roles
-    random.shuffle(all_roles_list)
+    random.shuffle(role_pool)
+    all_agents = [human] + ai_agents
+    all_roles = [human_role] + role_pool  # human_role at [0], NOT shuffled
 
     all_names = [a.name for a in all_agents]
-    for agent, role in zip(all_agents, all_roles_list):
+    for agent, role in zip(all_agents, all_roles):
         agent.state["role"] = role
         agent.state["camp"] = "werewolf" if role == "werewolf" else "villager"
         agent.state["is_alive"] = True
         agent.state["current_alive"] = all_names.copy()
         agent.state["name_to_role"] = deepcopy(
-            {a.name: r for a, r in zip(all_agents, all_roles_list)})
+            {a.name: r for a, r in zip(all_agents, all_roles)})
         if hasattr(agent, 'wm'):
             agent.wm.my_role = role
             agent.wm.my_camp = "werewolf" if role == "werewolf" else "villager"
@@ -186,9 +192,10 @@ def _run_player_game(role_choice):
     human.update_public_info()
 
     _session.update(running=True, mode="player", human=human, agents=all_agents)
-    # Emit init WITHOUT roles (player mode: hide roles)
+    # Emit init: hide other roles, show human their actual role
     my_emit("init", {"players": [{"name": a.name, "role": "???", "camp": "???"}
-                                for a in all_agents], "my_role": human_role})
+                                for a in ai_agents], "my_role": human_role,
+                     "my_name": "Player1"})
     asyncio.run(werewolves_game(all_agents))
     # Reveal all roles at end
     my_emit("reveal", {"players": [{"name": a.name, "role": a.state.get("role", "?"),
