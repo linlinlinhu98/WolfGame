@@ -95,7 +95,10 @@ function handle(msg) {
         case "init":
             gs.players = {}; (msg.data.players||[]).forEach(p => { gs.players[p.name] = { role: p.role, camp: p.camp, alive: true }; });
             if (msg.data.my_role) { myRole = msg.data.my_role; document.getElementById("myId").textContent = "你是 " + myName + " · " + roleLabel(myRole); }
-            renderPlayers(); break;
+            // Force full re-render: clear grid first, then rebuild all 9 cards
+            document.getElementById("playerGrid").innerHTML = "";
+            renderPlayers();
+            break;
         case "phase_change":
             gs.phase = msg.data.phase; gs.round = msg.data.round || gs.round;
             document.getElementById("roundLabel").textContent = "第" + gs.round + "轮";
@@ -250,17 +253,25 @@ document.addEventListener("keydown", e => { if(e.key==="Enter"&&document.activeE
 function send(text) { fetch("/api/player_input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})}); hideInput(); }
 
 function renderPlayers() {
+    const grid = document.getElementById("playerGrid");
     Object.entries(gs.players).forEach(([n,i]) => {
         let c = document.getElementById("pcard-" + n);
         if (!c) {
             c = document.createElement("div"); c.id = "pcard-" + n;
-            document.getElementById("playerGrid").appendChild(c);
+            grid.appendChild(c);
         }
         c.className = "pcard" + (i.alive ? "" : " dead");
         const showRole = mode === "god" || (mode === "player" && (n === myName || !i.alive));
         const you = (mode === "player" && n === myName) ? " (你)" : "";
         c.innerHTML = `<div class="pname">${n}${you}</div><div class="pstatus">${i.alive?"存活":"死亡"}</div><div class="prole">${showRole&&i.role!=="???"?roleLabel(i.role):"???"}</div>`;
     });
+    // Remove stale cards for players not in gs.players
+    for (let i = 1; i <= 9; i++) {
+        const card = document.getElementById("pcard-Player" + i);
+        if (card && !gs.players["Player" + i]) {
+            card.remove();
+        }
+    }
 }
 function addLog(id, html) {
     const log = document.getElementById(id); if (!log) return;

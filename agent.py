@@ -402,7 +402,13 @@ class PlayerAgent(ReActAgentBase):
         # Split reasoning and decision
         reasoning, decision = self._split_reasoning(text)
         if reasoning:
-            print(f"[{self.name}] 推理: {reasoning[:200]}")
+            # Filter wolf self-reveal in console output
+            clean = reasoning
+            for phrase in ["作为狼人", "我是狼人", "我们狼人", "狼队友", "作为一只狼"]:
+                clean = clean.replace(phrase, "基于局势")
+            if len(clean) > 200:
+                clean = clean[:200]
+            print(f"[{self.name}] 推理: {clean}")
         target = self._parse_target(decision, mode)
         return self._decision_to_plan(mode, target)
 
