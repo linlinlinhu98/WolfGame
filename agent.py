@@ -752,10 +752,12 @@ class PlayerAgent(ReActAgentBase):
         if vote_context:
             parts.append(f"【投票记录】\n{vote_context}\n")
         parts.append(f"【本轮发言】第{pos}位\n{current_context}")
-        # If verification found a strong match, prepend to strategy
-        if verify_lines:
-            strategy = "【重要：有人说了关于你的事，先处理这个！】\n" + "\n".join(verify_lines) + "\n\n" + strategy
         parts.append(f"\n【策略】\n{strategy}")
+        # Verification at the VERY END (recency bias — LLM sees this right before output)
+        if verify_lines:
+            parts.append(f"\n【‼️ 发布前必须检查：有人说了关于你的话，你私下知道真假！】")
+            parts.extend(verify_lines)
+            parts.append("你在回复中必须处理以上信息。如果是真的→公开确认。如果是假的→公开揭穿。不能沉默！")
         parts.append(f"\n【回复格式】\n{format_line}")
 
         return "\n".join(parts)
@@ -808,6 +810,7 @@ class PlayerAgent(ReActAgentBase):
                 "数值推理: 游戏继续→狼人未达半数。根据存活人数可推算最多剩几只狼。\n"
                 "策略: 伪装村民，用夜间死亡信息暗中分析。第1轮必救。\n"
                 "⚠️ 铁律: 不透露你是女巫。不说'昨晚谁死了'等暴露夜知信息的话。\n"
+                "❌ 绝对禁止假跳预言家！你是女巫不是预言家。假跳预言家=混淆好人=帮狼人赢！\n"
                 "发言中: 以村民视角分析，指出怀疑对象和理由，声明投票目标。\n"
                 "投票时: 投你发言中怀疑的人。"
             )
@@ -816,7 +819,8 @@ class PlayerAgent(ReActAgentBase):
                 "🎯 胜利条件: 所有狼人被淘汰（共3狼）。\n"
                 "数值推理: 游戏继续→狼人未达半数。如果只剩4人而游戏未结束→最多1狼！\n"
                 "策略: 伪装村民。你的威慑力在死后开枪。\n"
-                "⚠️ 铁律: 绝不假跳预言家/女巫！你是猎人（死后才能证明），假跳只会混乱好人阵营。\n"
+                "❌ 铁律: 绝不假跳预言家！你是猎人不是预言家。假跳=混浠好人=帮狼赢！\n"
+                "如果有人正确说出了你是猎人→那个人是真预言家！你必须公开确认！\n"
                 "发言中: 以村民视角分析，指出怀疑对象和理由，声明投票目标。\n"
                 "投票时: 投你发言中怀疑的人。"
             )

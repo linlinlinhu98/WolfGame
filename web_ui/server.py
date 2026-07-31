@@ -141,6 +141,9 @@ def _run_god_game():
     ag._emit_web = my_emit
     agents = [PlayerAgent(f"Player{i}") for i in range(1, 10)]
     _session["agents"] = agents
+    # Wait for SSE connection to establish before emitting events
+    import time
+    time.sleep(1)
     # Init event is emitted by game.py after role assignment (with correct roles)
     asyncio.run(werewolves_game(agents))
     my_emit("done", {})
