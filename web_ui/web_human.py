@@ -87,6 +87,7 @@ class WebHumanAgent(PlayerAgent):
             return self._build_action_msg("hunter_shot", action)
         if is_dead:
             speech = await self._wait_for_input()
+            _emit_web("speech", {"player": self.name, "content": speech})
             return Msg(name=self.name, content=speech, role="assistant",
                        metadata={"human": True})
         if wm.phase == "night":
@@ -94,6 +95,7 @@ class WebHumanAgent(PlayerAgent):
             return self._build_action_msg("night", action)
         if wm.phase == "discussion":
             speech = await self._wait_for_input()
+            _emit_web("speech", {"player": self.name, "content": speech})
             return Msg(name=self.name, content=speech, role="assistant",
                        metadata={"human": True})
         if wm.phase == "voting":
@@ -102,6 +104,7 @@ class WebHumanAgent(PlayerAgent):
             if vote not in alive or vote == self.name:
                 others = [p for p in alive if p != self.name]
                 vote = others[0] if others else ""
+            _emit_web("vote", {"voter": self.name, "target": vote})
             return Msg(name=self.name, content=vote, role="assistant",
                        metadata={"vote": vote, "human": True})
 
