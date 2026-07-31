@@ -397,6 +397,21 @@ class PlayerAgent(ReActAgentBase):
 
     async def _decide(self, mode: str) -> Dict[str, Any]:
         """LLM tactical decision — first reasons, then decides."""
+        # For vote mode: use stated target from discussion speech if available
+        if mode == "vote" and hasattr(self, '_stated_vote') and self._stated_vote:
+            stated = self._stated_vote
+            alive = self.wm.alive_players
+            role = self.wm.my_role
+            # Validate: must be alive, not self, not wolf teammate
+            if stated in alive and stated != self.name:
+                mates = self._get_wolf_mates(alive) if role == "werewolf" else []
+                if stated not in mates:
+                    print(f"[{self.name}] 投票 → {stated} (发言已声明)")
+                    _emit_web("vote", {"voter": self.name, "target": stated})
+                    return self._decision_to_plan(mode, stated)
+                else:
+                    print(f"[{self.name}] 发言声明投队友{stated}，改LLM决定")
+
         prompt = self._build_decision_prompt(mode)
         text = await self._llm(prompt, max_t=600, temp=0.7)
         # Split reasoning and decision
@@ -445,6 +460,12 @@ class PlayerAgent(ReActAgentBase):
         public = self._clean_text(public)
         print(f"[{self.name}] {public}")
         _emit_web("speech", {"player": self.name, "content": public})
+
+        # Extract stated vote target from speech for consistency enforcement
+        self._stated_vote = None
+        vm = re.search(r'(?:投|投票给|我投|票给)\s*(Player\d)', public)
+        if vm:
+            self._stated_vote = vm.group(1)
 
         self.memory.add(MemoryEntry(
             EntryType.MY_SPEECH, self.wm.round_num, self.name, public,
@@ -512,7 +533,8 @@ class PlayerAgent(ReActAgentBase):
             body = (
                 f"存活玩家: {', '.join(alive)}\n"
                 f"{my_speech_block}"
-                f"投票必须与发言一致！发言怀疑谁就投谁。\n"
+                f"❌ 禁止投自己！禁止投已死玩家！\n"
+                f"投票必须与发言一致！发言说投谁就投谁。\n"
                 f"讨论摘要:\n{summaries}"
             )
         elif mode == "night":
@@ -638,6 +660,7 @@ class PlayerAgent(ReActAgentBase):
             lines.append(f"⚠️ 你是{self.name}，已被淘汰，这是遗言！")
         if wm.round_num <= 1:
             lines.append("⚠️ 这是第1轮，没有历史发言。不要编造'前几轮''之前他说过'等内容！")
+        lines.append("⚠️ 不要声称别人投了谁——除非你在投票记录里亲眼看到。不要说'X投了自己'除非你真的看到投票记录。")
 
         # ═══════════════════════════════════════════
         # SECTION 2: CONTEXT (summaries, votes)
