@@ -9,6 +9,7 @@ from typing import Any
 
 from _vendor import Msg
 from agent import PlayerAgent
+import config
 
 
 class WebHumanAgent(PlayerAgent):
@@ -64,13 +65,12 @@ class WebHumanAgent(PlayerAgent):
                 info["witch_stage"] = "resurrect"
             elif "poison" in msg_content.lower() or "毒药" in msg_content or "毒杀" in msg_content:
                 info["witch_stage"] = "poison"
-        # Add teammate info for werewolves
+        # Add teammate info for werewolves (from the private TEAM_INFO channel)
         if wm.my_role == "werewolf":
-            info["teammates"] = [p for p in wm.alive_players
-                if self.state.get("name_to_role", {}).get(p) == "werewolf"
-                and p != self.name]
-            info["dead_teammates"] = [p for p in wm.dead_players
-                if self.state.get("name_to_role", {}).get(p) == "werewolf"]
+            info["teammates"] = [m for m in wm.my_teammates
+                if m in wm.alive_players and m != self.name]
+            info["dead_teammates"] = [m for m in wm.my_teammates
+                if m in wm.dead_players]
         self.public_info = info
 
     async def __call__(
@@ -107,6 +107,12 @@ class WebHumanAgent(PlayerAgent):
         if wm.phase == "voting":
             vote = await self._wait_for_input()
             alive = wm.alive_players
+            # R1 abstain (config-gated): same rule as AI agents — the human
+            # may abstain in round 1 when config.ALLOW_R1_ABSTAIN is on.
+            if vote.strip().lower() == "abstain" and wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN:
+                _emit_web("vote", {"voter": self.name, "target": "abstain"})
+                return Msg(name=self.name, content="abstain", role="assistant",
+                           metadata={"vote": "abstain", "human": True})
             if vote not in alive or vote == self.name:
                 others = [p for p in alive if p != self.name]
                 vote = others[0] if others else ""

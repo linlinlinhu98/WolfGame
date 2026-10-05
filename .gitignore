@@ -11,3 +11,4 @@ game_data/
 *.json
 .DS_Store
 .env
+*.log

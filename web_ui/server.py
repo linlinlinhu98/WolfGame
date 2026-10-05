@@ -4,17 +4,21 @@
 Start: python server.py → http://localhost:5000
 """
 import json, queue, threading, sys, os, random
-from copy import deepcopy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, render_template, Response, request, jsonify
 
+import config
+
 app = Flask(__name__)
 
-# Each game gets its own queue; SSE only reads from the newest one.
-# Old threads write to their captured queue (nobody reads → silent discard).
-_current_queue: queue.Queue = queue.Queue()
+# SSE broadcast hub: every connected browser gets its own queue and receives
+# EVERY event. (A single shared queue with competitive get() would split events
+# randomly between an active tab and any stale tab still open — the active tab
+# could then miss the init event and never show role assignment.)
+_subscribers: list[queue.Queue] = []
+_subscribers_lock = threading.Lock()
 
 # Current game session
 _session = {"running": False, "mode": None, "human": None, "agents": []}
@@ -22,10 +26,28 @@ _game_thread = None   # Reference to current game thread
 _game_stop_event = threading.Event()  # Signal old game threads to stop
 
 
-def _make_emit(q: queue.Queue):
-    """Create an emit function bound to a specific queue."""
+def _register(q: queue.Queue):
+    with _subscribers_lock:
+        _subscribers.append(q)
+
+
+def _unregister(q: queue.Queue):
+    with _subscribers_lock:
+        if q in _subscribers:
+            _subscribers.remove(q)
+
+
+def _broadcast(event: dict):
+    with _subscribers_lock:
+        subs = list(_subscribers)
+    for q in subs:
+        q.put(event)
+
+
+def _make_emit(_ignored=None):
+    """Create an emit function for a game thread. Broadcasts to all clients."""
     def _emit(t, d):
-        q.put({"type": t, "data": d})
+        _broadcast({"type": t, "data": d})
     return _emit
 
 
@@ -36,13 +58,21 @@ def index():
 
 @app.route("/stream")
 def stream():
+    q = queue.Queue()
+
     def event_stream():
-        while True:
-            try:
-                event = _current_queue.get(timeout=30)
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            except queue.Empty:
-                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        try:
+            _register(q)
+            while True:
+                try:
+                    event = q.get(timeout=30)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except queue.Empty:
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        finally:
+            # Client disconnected (tab closed / reload) — stop feeding it
+            _unregister(q)
+
     return Response(event_stream(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -51,6 +81,10 @@ def stream():
 def start_god():
     """Start god mode: 9 AI agents."""
     _stop_old_game()
+    # silent=True: old cached pages may POST without a JSON content-type
+    data = request.get_json(silent=True) or {}
+    # Rules options sent from the web start screen
+    config.ALLOW_R1_ABSTAIN = bool(data.get("abstain", True))
     _clear_events()
     _session.update(running=True, mode="god", human=None, agents=[])
     global _game_thread
@@ -63,8 +97,9 @@ def start_god():
 def start_player():
     """Start player mode: 1 human + 8 AI."""
     _stop_old_game()
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     role_choice = data.get("role", "random")
+    config.ALLOW_R1_ABSTAIN = bool(data.get("abstain", True))
     _clear_events()
     _session.update(running=True, mode="player", human=None, agents=[])
     global _game_thread
@@ -99,19 +134,42 @@ def api_status():
     return jsonify({"running": _session["running"], "mode": _session["mode"]})
 
 
+@app.route("/api/state")
+def api_state():
+    """Full state snapshot. Lets the frontend re-sync after an SSE reconnect
+    (events emitted during the disconnect are gone, most critically init)."""
+    if not _session["running"]:
+        return jsonify({"running": False})
+    mode = _session["mode"]
+    god = mode == "god"
+    players = [{"name": a.name,
+                "role": a.state.get("role", "?") if god else "???",
+                "camp": a.state.get("camp", "?") if god else "???",
+                "alive": a.state.get("is_alive", True)}
+               for a in (_session.get("agents") or [])]
+    return jsonify({"running": True, "mode": mode, "players": players})
+
+
+def _drain_all_queues():
+    with _subscribers_lock:
+        subs = list(_subscribers)
+    for q in subs:
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
+
 def _clear_events():
-    while not _current_queue.empty():
-        _current_queue.get_nowait()
+    _drain_all_queues()
 
 
 def _stop_old_game():
     """Stop any running game before starting a new one."""
-    global _current_queue, _game_thread, _game_stop_event
+    global _game_thread, _game_stop_event
     _game_stop_event.set()
-    # Unblock SSE handler: put sentinel in old queue, then replace with new queue
-    old_queue = _current_queue
-    _current_queue = queue.Queue()
-    old_queue.put({"type": "_wake", "data": {}})  # Unblocks old get() call
+    _drain_all_queues()
     # Resolve pending human input
     human = _session.get("human")
     if human and human._pending_future and not human._pending_future.done():
@@ -136,9 +194,13 @@ def _run_god_game():
     import game as gm
     import agent as ag
     # Capture this game's queue — old games write to their own (now dead) queue
-    my_emit = _make_emit(_current_queue)
+    my_emit = _make_emit()
     gm._emit_web_event = my_emit
     ag._emit_web = my_emit
+    # Rebind the stop event: game.py imported the original Event object at
+    # module load, while _stop_old_game() replaces ours each restart. Without
+    # this, every game after the first stop sees a stale SET event and aborts.
+    gm._game_stop_event = _game_stop_event
     agents = [PlayerAgent(f"Player{i}") for i in range(1, 10)]
     _session["agents"] = agents
     # Init event is emitted by game.py after role assignment (with correct roles)
@@ -154,9 +216,11 @@ def _run_player_game(role_choice):
     from web_human import WebHumanAgent
     import game as gm
     import agent as ag
-    my_emit = _make_emit(_current_queue)
+    my_emit = _make_emit()
     gm._emit_web_event = my_emit
     ag._emit_web = my_emit
+    # See _run_god_game: keep game.py's stop-event reference in sync.
+    gm._game_stop_event = _game_stop_event
 
     # Prepare role pool (9 roles total)
     role_pool = ["werewolf"] * 3 + ["villager"] * 3 + ["seer", "witch", "hunter"]
@@ -183,8 +247,8 @@ def _run_player_game(role_choice):
         agent.state["camp"] = "werewolf" if role == "werewolf" else "villager"
         agent.state["is_alive"] = True
         agent.state["current_alive"] = all_names.copy()
-        agent.state["name_to_role"] = deepcopy(
-            {a.name: r for a, r in zip(all_agents, all_roles)})
+        # No name_to_role in agent state — wolves get teammates via the game's
+        # private TEAM_INFO announcement (see game.py role setup).
         if hasattr(agent, 'wm'):
             agent.wm.my_role = role
             agent.wm.my_camp = "werewolf" if role == "werewolf" else "villager"
@@ -205,7 +269,7 @@ def _run_player_game(role_choice):
 
 
 def emit_event(event_type, data):
-    _current_queue.put({"type": event_type, "data": data})
+    _broadcast({"type": event_type, "data": data})
 
 
 if __name__ == "__main__":

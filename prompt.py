@@ -141,6 +141,13 @@ class ChinesePrompts:
         "[仅狼人可见] {}, 你们可以讨论并决定今晚要淘汰的玩家。当前存活玩家有：{}。"
         "如果达成一致，请将 `reach_agreement` 设为 True。"
     )
+
+    to_wolves_teammates = (
+        "[WEREWOLVES ONLY] {name}, 你的狼队友是: {mates}。"
+        "通过私密频道告知，其他玩家不知道你们的身份关系。"
+    )
+
+    vote_detail = "投票明细: {pairs}"
     
     to_wolves_vote = "[仅狼人可见] 你投票要杀死哪位玩家？"
 
@@ -157,6 +164,12 @@ class ChinesePrompts:
     to_witch_resurrect_yes = "[仅女巫可见] 女巫选择救活该玩家。"
 
     to_witch_poison = "[仅女巫可见] {witch_name}，你有一瓶一次性毒药，今晚要使用吗？请给出理由和决定。"
+
+    to_witch_action = (
+        "[仅女巫可见] {witch_name}，你是女巫。{situation}"
+        "解药{healing_status}，毒药{poison_status}（均全局限用一次）。"
+        "请一次性决定今晚的全部行动（救人/毒杀/都不用），给出理由和决定。"
+    )
 
     to_all_seer_turn = "轮到预言家行动，预言家请睁眼并查验一名玩家身份..."
 

@@ -274,6 +274,7 @@ class SpeechSummary:
     claims: List[str] = field(default_factory=list)         # "自称预言家" — about SELF
     reported: List[str] = field(default_factory=list)       # "PlayerX自称预言家" — about OTHERS (may be false!)
     vote_hint: str = ""
+    stated_vote: str = ""    # "PlayerX" from the explicit 投票意向: commitment line
     key_point: str = ""
 
 
@@ -299,6 +300,21 @@ def extract_speech_facts(speaker: str, content: str) -> SpeechSummary:
     ):
         target = m.group(1)
         if target != speaker:
+            s.accusations.append(target)
+
+    # Seer-style kill reports carry NO verb — "PlayerX是铁狼",
+    # "PlayerX=werewolf", "查杀PlayerX". The verb-based regex above misses
+    # them, which silently dropped seer kill claims from BOTH belief
+    # tracking and village vote coordination (found in eval game 6:
+    # solo seer named "Player8=werewolf" and nobody followed).
+    for m in re.finditer(
+        r'(Player\d)[\s，,、：:—\-]*(?:=|＝|(?<!不)是|(?<!不)为)[\s，,、：:—\-]*(?:werewolf|狼人?|铁狼)'
+        r'|(Player\d)[\s，,、]*[：:—\-]\s*(?:werewolf|狼人?|铁狼)'
+        r'|查杀[\s，,、：:—\-]*(Player\d)',
+        content, re.IGNORECASE
+    ):
+        target = next(g for g in m.groups() if g)
+        if target != speaker and target not in s.accusations:
             s.accusations.append(target)
 
     # Defenses: "PlayerX是好人", "相信PlayerX", "信任PlayerX", "PlayerX没问题"
@@ -336,6 +352,14 @@ def extract_speech_facts(speaker: str, content: str) -> SpeechSummary:
     vm = re.search(r'(?:投票|投|出)\s*(Player\d)', content)
     if vm:
         s.vote_hint = vm.group(1)
+
+    # Stated vote — the machine-checkable commitment line agents end their
+    # speeches with ("投票意向: PlayerX"). Precise pattern only (last
+    # occurrence wins): the loose vote_hint above fires on any "投X" mention
+    # and is far too noisy to accuse someone of a said-vs-cast mismatch.
+    sv = re.findall(r'投票意向\s*[:：]?\s*(Player\d+)', content)
+    if sv:
+        s.stated_vote = sv[-1]
 
     # Key point: first meaningful sentence
     sentences = re.split(r'[。！？.!?]', content)

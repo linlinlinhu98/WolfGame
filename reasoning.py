@@ -21,11 +21,13 @@ from enum import Enum
 
 class EventType(Enum):
     ROLE_ASSIGNED = "role_assigned"
+    TEAM_INFO = "team_info"    # Werewolf told their teammates (private)
     PHASE_CHANGE = "phase_change"
     PLAYER_LIST = "player_list"
     NIGHT_DEATH = "night_death"
     PEACEFUL_NIGHT = "peaceful_night"
     SPEECH = "speech"
+    VOTE_DETAIL = "vote_detail"  # Full voter→target mapping for a round
     VOTE_RESULT = "vote_result"
     PLAYER_ELIMINATED = "player_eliminated"
     WITCH_INFO = "witch_info"  # Witch told who died
@@ -60,8 +62,17 @@ class WorkingMemory:
     night_killed: str = ""           # Who died tonight
     healing_used: bool = False
     poison_used: bool = False
+    my_saves: List[str] = field(default_factory=list)  # Witch's saved players (银水)
     seer_checks: Dict[str, str] = field(default_factory=dict)  # {name: role}
     speaking_order: List[str] = field(default_factory=list)
+    # Authoritative public ledger — written ONLY by the game engine
+    # (game.py._push_ledger), never by the LLM. One entry per round:
+    # {"round", "night_deaths": [], "votes": {voter: target}, "tie": [],
+    #  "revote_counts": {target: n}, "lynched": str|None, "day_deaths": []}
+    # Rationale (CoALA, arXiv:2309.02427): working memory must be a data
+    # structure maintained outside the LLM; LLM paraphrase of game history
+    # is a proven hallucination source (arXiv:2409.01575).
+    public_ledger: List[dict] = field(default_factory=list)
 
     @property
     def n_alive(self) -> int:
@@ -155,10 +166,14 @@ class BeliefTracker:
         self.trust_edges: Dict[Tuple[str, str], float] = {}
 
     def initialize(
-        self, all_players: List[str], my_role: str, name_to_role: Dict[str, str]
+        self, all_players: List[str], my_role: str, n_wolves: int = 3
     ) -> None:
-        """Set initial beliefs with prior probabilities."""
-        n_wolves = sum(1 for r in name_to_role.values() if r == "werewolf")
+        """Set initial beliefs with prior probabilities.
+
+        NOTE: deliberately does NOT take the ground-truth role mapping — an
+        agent's beliefs must be built from public information + its own private
+        channel only. Werewolf teammates arrive separately via mark_teammates().
+        """
         n_total = len(all_players)
         prior_wolf = n_wolves / n_total if n_total > 0 else 0.33
         prior_role = (1.0 - prior_wolf) / 4  # Distribute among 4 non-wolf roles
@@ -167,18 +182,23 @@ class BeliefTracker:
             if name == self.player_name:
                 continue
             belief = PlayerBelief(name=name)
-            if my_role == "werewolf" and name_to_role.get(name) == "werewolf":
-                # Known teammate → trusted
-                belief.p_werewolf = 0.0
-                belief.p_villager = 1.0  # Technically incorrect but for modeling
-                belief.evidence_against.append("已知狼队友")
-            else:
-                belief.p_werewolf = prior_wolf
-                belief.p_seer = prior_role
-                belief.p_witch = prior_role
-                belief.p_hunter = prior_role
-                belief.p_villager = prior_role
+            belief.p_werewolf = prior_wolf
+            belief.p_seer = prior_role
+            belief.p_witch = prior_role
+            belief.p_hunter = prior_role
+            belief.p_villager = prior_role
             self.beliefs[name] = belief
+
+    def mark_teammates(self, teammates: List[str]) -> None:
+        """Werewolf-only: mark known teammates as trusted (never suspect them)."""
+        for name in teammates:
+            if name == self.player_name:
+                continue
+            b = self._get(name)
+            b.p_werewolf = 0.0
+            b.p_villager = 1.0  # Technically incorrect but for modeling
+            if "已知狼队友" not in b.evidence_against:
+                b.evidence_against.append("已知狼队友")
 
     def _get(self, name: str) -> PlayerBelief:
         if name not in self.beliefs:
@@ -244,11 +264,15 @@ class BeliefTracker:
             self._adjust(voter, 0.03, f"R{round_num}孤立投票给{target}")
 
     def observe_night_death(
-        self, dead: str, name_to_role: Dict[str, str],
+        self, dead: str, known_roles: Dict[str, str],
         alive: List[str], round_num: int
     ) -> None:
-        """Update beliefs when someone dies at night."""
-        role = name_to_role.get(dead)
+        """Update beliefs when someone dies at night.
+
+        `known_roles` contains only roles this agent legitimately knows
+        (itself, its seer checks, wolf teammates) — not ground truth.
+        """
+        role = known_roles.get(dead)
         if role in ("seer", "witch", "hunter"):
             # Key role killed → wolves are strategic
             for name in alive:

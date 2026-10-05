@@ -66,17 +66,21 @@ class DiscussionModel(BaseModel):
     )
 
 
-def get_vote_model(agents: list[AgentBase]) -> Type[BaseModel]:
-    """Get the vote model by player names."""
-    if not agents:
+def get_vote_model(agents: list[AgentBase], extra: tuple = ()) -> Type[BaseModel]:
+    """Get the vote model by player names.
+
+    `extra` adds literal choices beyond alive player names — currently used
+    for "abstain" in round 1 (config.ALLOW_R1_ABSTAIN).
+    """
+    if not agents and not extra:
         class DefaultVoteModel(BaseModel):
             vote: str = Field(description="Vote target name", default="")
         return DefaultVoteModel
 
-    player_names = tuple(_.name for _ in agents)
+    player_names = tuple(_.name for _ in agents) + tuple(extra)
 
     class VoteModel(BaseModel):
-        """The vote output format."""
+        """The vote output model."""
         vote: Literal[player_names] = Field(  # type: ignore
             description="You must vote! The name of the player you want to vote for",
         )
@@ -89,6 +93,27 @@ class WitchResurrectModel(BaseModel):
     resurrect: bool = Field(
         description="Whether you want to resurrect the player",
         default=False,
+    )
+
+
+class WitchActionModel(BaseModel):
+    """Combined single-call night action for the witch.
+
+    Replaces the old two-question flow (resurrect? then poison?) which could
+    desync agent state from game state: the agent makes ONE decision covering
+    both potions, and the game engine reads both fields from the same result.
+    """
+    resurrect: bool = Field(
+        description="Whether to use the healing potion on tonight's victim",
+        default=False,
+    )
+    poison: bool = Field(
+        description="Whether to use the poison potion tonight",
+        default=False,
+    )
+    name: Optional[str] = Field(
+        description="The name of the player you want to poison",
+        default=None,
     )
 
 

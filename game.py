@@ -1,6 +1,5 @@
 """A werewolf game implemented by agentscope."""
 import asyncio
-from copy import deepcopy
 import time
 from datetime import datetime
 import numpy as np
@@ -23,12 +22,12 @@ from utils import (
 from structured_model import (
     DiscussionModel,
     get_vote_model,
-    get_poison_model,
-    WitchResurrectModel,
+    WitchActionModel,
     get_seer_model,
     get_hunter_model,
 )
 from prompt import ChinesePrompts as Prompts
+import config
 
 # Optional web UI integration
 try:
@@ -74,13 +73,23 @@ def collect_game_data(agents, players, game_result, game_rounds):
             })
     
     # 构建游戏数据
+    # Winner from game STATE, not the result string — the old code matched
+    # "werewolf" against a CHINESE message, so every game recorded "villager".
+    n_wolves = len(players.werewolves)
+    n_alive = len(players.current_alive)
+    if n_wolves == 0:
+        winner = "villager"
+    elif n_alive > 0 and n_wolves * 2 >= n_alive:
+        winner = "werewolf"
+    else:
+        winner = "draw"  # max rounds reached
     game_data = {
         "id": game_id,
         "timestamp": timestamp,
         "players": player_data,
         "rounds": game_rounds,
         "result": game_result,
-        "winner": "werewolf" if "werewolf" in game_result.lower() else "villager"
+        "winner": winner
     }
     
     # 保存数据到文件
@@ -152,6 +161,31 @@ def sync_alive_status(players: Players):
         if hasattr(agent, 'wm'):
             agent.wm.alive_players = alive_names.copy()
             agent.wm.dead_players = dead_names.copy()
+
+
+def _push_ledger(players: Players, round_num: int, **fields):
+    """Push ground-truth public facts into every agent's WorkingMemory.
+
+    The ledger is written by the game engine only. Agents render it verbatim
+    into their prompts and are forbidden from reconstructing vote/death
+    history from memory — LLM paraphrase of game history is a proven
+    hallucination source (eval game 10: a villager "remembered" a vote that
+    never happened and lynched the hunter on it). Research basis:
+    arXiv:2409.01575 (keep game state outside the LLM), arXiv:2309.02427
+    (working memory as an external data structure, READ-only for the LLM).
+    """
+    for agent in players.all_players:
+        wm = getattr(agent, "wm", None)
+        if wm is None:
+            continue  # e.g. HumanAgent has no WorkingMemory
+        entry = next((e for e in wm.public_ledger if e["round"] == round_num), None)
+        if entry is None:
+            entry = {"round": round_num, "night_deaths": [], "votes": {},
+                     "tie": [], "revote_counts": {}, "lynched": None,
+                     "day_deaths": []}
+            wm.public_ledger.append(entry)
+        for key, value in fields.items():
+            entry[key] = value
 
 async def wait_all_players_ready(players: Players, max_wait_time: int = 180, check_interval: int = 2) -> bool:
     """全局等待：直到所有玩家初始化完成"""
@@ -262,7 +296,6 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
     if pre_assigned:
         # Player mode: roles pre-assigned by _run_player_game, don't shuffle
         all_player_names = [agent.name for agent in agents]
-        name_to_role = {a.name: a.state["role"] for a in agents}
         for agent in agents:
             role = agent.state["role"]
             await agent.observe(
@@ -271,7 +304,6 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                 ),
             )
             players.add_player(agent, role)
-            agent.state["name_to_role"] = deepcopy(name_to_role)
             agent.state["current_alive"] = all_player_names.copy()
     else:
         # God mode: shuffle and assign randomly
@@ -279,10 +311,6 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
         np.random.shuffle(agents)
         np.random.shuffle(roles)
         all_player_names = [agent.name for agent in agents]
-
-        name_to_role = {}
-        for agent, role in zip(agents, roles):
-            name_to_role[agent.name] = role
 
         for agent, role in zip(agents, roles):
             if not hasattr(agent, 'state') or agent.state is None:
@@ -295,12 +323,24 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
             )
             players.add_player(agent, role)
 
-            agent.state["name_to_role"] = deepcopy(name_to_role)
             agent.state["current_alive"] = all_player_names.copy()
             if role == "werewolf":
                 agent.state["camp"] = "werewolf"
             else:
                 agent.state["camp"] = "villager"
+
+    # Inform werewolves of their teammates via the PRIVATE channel.
+    # (Agents no longer receive the ground-truth name_to_role map — teammate
+    # knowledge is exactly what a real werewolf player would get, nothing more.)
+    for wolf in players.werewolves:
+        mates = [w.name for w in players.werewolves if w.name != wolf.name]
+        await wolf.observe(
+            await moderator(
+                Prompts.to_wolves_teammates.format(
+                    name=wolf.name, mates=", ".join(mates),
+                ),
+            ),
+        )
 
     async with MsgHub(participants=agents) as init_hub:
         alive_str = names_to_str(all_player_names)
@@ -350,6 +390,29 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                 await moderator(Prompts.to_all_night),
             )
             killed_player, poisoned_player, shot_player = None, None, None
+            # Day-phase records initialized up-front so the FINAL round is
+            # still recorded when a win check fires before voting happens.
+            day_speeches = []
+            voted_player, votes_stats, msgs_vote = None, "", []
+
+            def _append_round():
+                game_rounds.append({
+                    "round_number": round_idx + 1,
+                    "night_actions": {
+                        "killed_player": killed_player,
+                        "poisoned_player": poisoned_player,
+                        "shot_player": shot_player
+                    },
+                    "day_discussion": day_speeches,
+                    "voting": {
+                        "voted_player": voted_player,
+                        "votes_stats": votes_stats,
+                        "votes": dict(zip(
+                            [m.name for m in msgs_vote if m and m.metadata],
+                            [m.metadata.get("vote") for m in msgs_vote if m and m.metadata],
+                        )),
+                    }
+                })
 
             # Werewolves discuss - each wolf proposes a target via agent reasoning
             if players.werewolves and len(players.werewolves) > 0:
@@ -459,71 +522,76 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                     await werewolves_hub.__aexit__(None, None, None)
                     del werewolves_hub
 
-            # Witch's turn
+            # Witch's turn — SINGLE combined decision for both potions.
+            # (Old flow asked "resurrect?" then "poison?" in two calls; the agent's
+            # internal single-decision model answered both at once, so a poison
+            # choice in call #1 was silently dropped while its potion flag was
+            # already consumed — state desync. One call => one source of truth.)
             if players.witch and len(players.witch) > 0:
                 _emit_web_event("phase_log", {"panel": "night", "text": Prompts.to_all_witch_turn})
                 await alive_players_hub.broadcast(
                     await moderator(Prompts.to_all_witch_turn),
                 )
-                msg_witch_poison = None
                 for agent in players.witch:
                     if not check_player_ready(agent):
                         continue
                     if not agent.state.get("is_alive", True):
                         continue  # Dead witch can't act
-                        
-                    # Cannot heal witch herself
-                    msg_witch_resurrect = None
+
+                    # Build situation text (keeps the WITCH_INFO perception patterns)
+                    if killed_player and killed_player == agent.name:
+                        situation = "今晚你被狼人袭击了。你不能用解药救自己。"
+                    elif killed_player:
+                        situation = f"今晚{killed_player}被淘汰。"
+                    else:
+                        situation = "今晚是平安夜，无人被杀。"
+                    witch_text = Prompts.to_witch_action.format(
+                        witch_name=agent.name,
+                        situation=situation,
+                        healing_status="可用" if healing else "已用",
+                        poison_status="可用" if poison else "已用",
+                    )
+
                     saved_player = None  # Track who was saved to prevent self-poison
-                    if healing and killed_player and killed_player != agent.name:
-                        msg_witch_resurrect = await agent(
-                            await moderator(
-                                Prompts.to_witch_resurrect.format(
-                                    witch_name=agent.name, dead_name=killed_player
-                                ),
-                            ),
-                            structured_model=WitchResurrectModel,
-                            strict_mode=True,
-                            retry=2
-                        )
-                        if msg_witch_resurrect and msg_witch_resurrect.metadata.get("resurrect"):
+                    msg_witch = await agent(
+                        await moderator(witch_text),
+                        structured_model=WitchActionModel,
+                        strict_mode=True,
+                        retry=2,
+                    )
+                    meta = msg_witch.metadata if msg_witch and msg_witch.metadata else {}
+
+                    # Healing potion
+                    if meta.get("resurrect"):
+                        if healing and killed_player and killed_player != agent.name:
                             saved_player = killed_player
                             killed_player = None
                             healing = False
-                    elif healing and killed_player and killed_player == agent.name:
-                        await agent.observe(
-                            await moderator(
-                                f"[仅女巫可见] {agent.name}，你是女巫，今晚你被狼人袭击了。你不能用解药救自己，但毒药仍然可用。",
-                            ),
-                        )
-                    elif healing:
-                        # 没有人被击杀，但女巫还有解药
-                        pass
-
-                    # Has poison potion
-                    if poison:
-                        poison_text = Prompts.to_witch_poison.format(witch_name=agent.name)
-                        if saved_player:
-                            poison_text += (
-                                f"\n⚠️ 你刚刚用解药救了 {saved_player}！"
-                                f"绝对不能毒死你亲手救的人！从其他人中选择。"
+                            await agent.observe(
+                                await moderator(Prompts.to_witch_resurrect_yes),
                             )
-                        msg_witch_poison = await agent(
-                            await moderator(poison_text),
-                            structured_model=get_poison_model(players.current_alive),
-                            strict_mode=True,
-                            retry=2
-                        )
-                        if msg_witch_poison and msg_witch_poison.metadata.get("poison", False):
-                            poisoned_player = msg_witch_poison.metadata.get("name")
-                            # 校验毒杀目标存活，且不能是刚救的人
-                            if poisoned_player not in [p.name for p in players.current_alive]:
-                                poisoned_player = None
-                            elif saved_player and poisoned_player == saved_player:
+                        else:
+                            # Engine rejected the resurrect — roll back the
+                            # potion flag the agent set eagerly in its planner.
+                            if hasattr(agent, "wm"):
+                                agent.wm.healing_used = False
+
+                    # Poison potion
+                    if meta.get("poison") and poison:
+                        candidate = meta.get("name")
+                        alive_names = [p.name for p in players.current_alive]
+                        if (
+                            candidate in alive_names
+                            and candidate != agent.name
+                            and candidate != saved_player
+                        ):
+                            poisoned_player = candidate
+                            poison = False
+                        else:
+                            if candidate == saved_player:
                                 print(f"[女巫] 试图毒死刚救的{saved_player}，已阻止")
-                                poisoned_player = None
-                            else:
-                                poison = False
+                            if hasattr(agent, "wm"):
+                                agent.wm.poison_used = False
 
             # Seer's turn
             if players.seer and len(players.seer) > 0:
@@ -581,12 +649,17 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
 
             # Update alive players
             dead_tonight = [killed_player, poisoned_player, shot_player]
-            dead_tonight = [p for p in dead_tonight if p and p in [x.name for x in players.current_alive]]
+            # dedupe: wolf kill and witch poison can hit the SAME player —
+            # dict.fromkeys preserves order while dropping repeats
+            alive_now = [x.name for x in players.current_alive]
+            dead_tonight = list(dict.fromkeys(p for p in dead_tonight if p and p in alive_now))
             if dead_tonight:
                 print(f"夜间死亡玩家：{dead_tonight}")
                 _emit_web_event("death", {"players": dead_tonight, "phase": "night"})
                 players.update_players(dead_tonight)
                 sync_alive_status(players)
+            # Ground-truth ledger: night deaths (empty list = peaceful night)
+            _push_ledger(players, round_idx + 1, night_deaths=list(dead_tonight))
 
             # Day phase
             alive_player_names = [p.name for p in players.current_alive if check_player_ready(p)]
@@ -623,6 +696,7 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                 _emit_web_event("game_over", {"result": res})
                 print()
                 # Reflection disabled
+                _append_round()  # record the final (night-only) round
                 collect_game_data(agents, players, res, game_rounds)
                 return
 
@@ -647,6 +721,10 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                 # Broadcast speech to all other alive players (replaces MsgHub auto-broadcast)
                 if speech_msg:
                     await alive_players_hub.broadcast(speech_msg)
+                    if isinstance(speech_msg.content, str) and speech_msg.content.strip():
+                        day_speeches.append(
+                            {"speaker": speech_msg.name, "content": speech_msg.content}
+                        )
 
             # Disable auto broadcast to avoid leaking info
             alive_players_hub.set_auto_broadcast(False)
@@ -656,12 +734,27 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                 continue
 
             vote_prompt_text = Prompts.to_all_vote.format(names_to_str(alive_player_names))
+            # R1 abstain option (config.ALLOW_R1_ABSTAIN): with zero checks
+            # and no evidence yet, agents may abstain instead of lynching on
+            # vibes. Only the FIRST ballot of round 1 — tie re-votes are
+            # restricted-candidate and must not offer abstain.
+            allow_r1_abstain = (
+                config.ALLOW_R1_ABSTAIN and round_idx == 0
+            )
+            if allow_r1_abstain:
+                vote_prompt_text += (
+                    " 提示: 本轮是第1天，尚无查验信息。若你没有任何可验证证据，"
+                    "可投 abstain 弃票（本轮将无人出局）。有明确证据则正常投票。"
+                )
             _emit_web_event("phase_log", {"panel": "day", "text": vote_prompt_text, "label": "投票环节"})
 
             msgs_vote = await fanout_pipeline(
                 agents=players.current_alive,
                 msg=await moderator(vote_prompt_text),
-                structured_model=get_vote_model(players.current_alive),
+                structured_model=get_vote_model(
+                    players.current_alive,
+                    extra=("abstain",) if allow_r1_abstain else (),
+                ),
                 enable_gather=True,
                 strict_mode=True,       # 强制校验：不满足Literal枚举则不通过
                 retry=3,                # 重试3次：校验失败后让AI重新生成，直到合法
@@ -682,12 +775,15 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                 print("本轮无有效投票，跳过白天淘汰")
                 voted_player = None
                 votes_stats = "无有效投票"
+                _push_ledger(players, round_idx + 1, votes={}, lynched=None)
             else:
                 vote_result, votes_stats, is_tie = majority_vote(
                     votes=day_votes,
                     alive_players=alive_player_names
                 )
                 voted_player = None
+                is_re_tie = False
+                new_votes = []
 
                 if is_tie:
                     # vote_result is like "tie: Player3,Player8" — strip prefix
@@ -727,11 +823,33 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                     voted_player = vote_result
                     votes_stats = f"投票结果：{votes_stats}，最终淘汰：{voted_player}"
 
+                # Ground-truth ledger: first ballot + tie/re-vote + outcome
+                _vote_map = {
+                    m.name: m.metadata.get("vote")
+                    for m in msgs_vote
+                    if m and m.metadata and m.metadata.get("vote")
+                }
+                _fields = {"votes": _vote_map, "lynched": voted_player}
+                if is_tie:
+                    _fields["tie"] = list(tie_candidates)
+                    if not is_re_tie and new_votes:
+                        from collections import Counter as _Counter
+                        _fields["revote_counts"] = dict(_Counter(new_votes))
+                _push_ledger(players, round_idx + 1, **_fields)
+
                 # Broadcast the voting messages together
                 res_text = Prompts.to_all_res.format(votes_stats, voted_player or "无")
                 _emit_web_event("phase_log", {"panel": "day", "text": res_text, "label": "投票结果"})
+                # Public voter→target detail so agents can analyze vote patterns
+                # (bandwagon / wolf-pack voting) from facts, not guesses.
+                detail_pairs = ", ".join(
+                    f"{m.name}→{m.metadata.get('vote')}"
+                    for m in msgs_vote
+                    if m and m.metadata and m.metadata.get("vote")
+                )
                 voting_msgs = [
                     *msgs_vote,
+                    await moderator(Prompts.vote_detail.format(pairs=detail_pairs)),
                     await moderator(res_text),
                 ]
 
@@ -764,12 +882,14 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
 
                 # Update alive players (day)
                 dead_today = [voted_player, shot_player_day]
-                dead_today = [p for p in dead_today if p and p in alive_player_names]
+                dead_today = list(dict.fromkeys(p for p in dead_today if p and p in alive_player_names))
                 if dead_today:
                     print(f"白天死亡玩家：{dead_today}")
                     _emit_web_event("death", {"players": dead_today, "phase": "day"})
                     players.update_players(dead_today)
                     sync_alive_status(players)
+                    # Ground-truth ledger: day deaths (lynch + hunter shot)
+                    _push_ledger(players, round_idx + 1, day_deaths=list(dead_today))
                 # Check winning
                 res = players.check_winning()
                 if res:
@@ -779,24 +899,12 @@ async def werewolves_game(agents: list[PlayerAgent]) -> None:
                     _emit_web_event("game_over", {"result": res})
                     print()
                     # Reflection disabled
+                    _append_round()  # record the final round before returning
                     collect_game_data(agents, players, res, game_rounds)
                     return
 
         # 记录轮次信息
-        round_data = {
-            "round_number": round_idx + 1,
-            "night_actions": {
-                "killed_player": killed_player,
-                "poisoned_player": poisoned_player,
-                "shot_player": shot_player
-            },
-            "day_discussion": "",
-            "voting": {
-                "voted_player": voted_player,
-                "votes_stats": votes_stats
-            }
-        }
-        game_rounds.append(round_data)
+        _append_round()
 
         # The day ends
         first_day = False

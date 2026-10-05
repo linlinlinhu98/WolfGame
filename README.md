@@ -37,10 +37,19 @@
 ### AI 推理能力
 
 - **认知架构**：感知 → 记忆（工作+情景+信念）→ 推理（策略+心智理论+发言）→ 行动
-- **信念追踪**：每个 Agent 维护对所有人的角色概率估计（贝叶斯更新）
+- **信念追踪**：每个 Agent 维护对所有人的角色概率估计（贝叶斯更新），证据来自发言质量、投票抱团/孤立票、夜间死亡模式
 - **数值推理**：自动推算"游戏未结束→狼人未达半数→最多剩余 X 只狼"
 - **抗幻觉**：事实清单 + 首尾重复（U-shaped attention），关键事实置于 prompt 首尾
-- **言行一致约束**：投票提示词注入本人发言，强制投票与发言中怀疑对象一致
+- **言行一致约束**：发言末尾强制输出机器可校验的 `投票意向: PlayerX` 承诺行，投票环节以此为准（研究显示显式承诺可将行动不一致率从 ~25% 降至 ~2%）
+- **好人共识机制**（文献驱动，详见下方"研究依据"）：唯一预言家报查杀 → 好人阵营投票环节自动向查杀目标集中（LSPO, arXiv:2502.04686 验证为好人最高胜率涌现策略）；对跳时按查验链完整性分辨真伪
+- **反事实证据自检**（CaM-Wolf, arXiv:2607.26393）：好人指控前必须回答"去掉这条证据我还怀疑TA吗"，无证据不点名——抑制 LLM 对说真话村民 44-46% 的误伤率（WOLF, arXiv:2512.09187）
+- **权威事实账本**（CoALA / arXiv:2409.01575 / Lost in the Middle）：游戏引擎每轮把夜死、逐票、平票重投、出局等公开事实直写智能体工作记忆，prompt 末尾逐字渲染【权威记录】——历史引用禁止凭 LLM 记忆复述（实测虚构投票引用 1 起→0 起）；并自动派生"声称投票 vs 实际投票"的言行不一信号
+- **查验链×死亡记录交叉验证**（Werewolf Arena, arXiv:2407.13943 的确定性化）：对每个跳预言家者，正则提取其逐轮查验声明，对照【权威记录】死亡时间线——声称"第R轮查X"而 X 在第 R 轮前已出局 = 可证明的编造；对跳与唯一声明场景均自动标注，且矛盾者不得带队投票
+- **女巫决策接地 + 首夜禁毒**：女巫夜间决策注入【权威记录】（投票抱团是用毒唯一可靠证据）；首夜信息量为零时用毒被规则层硬禁止（盲毒命中狼仅 3/8，prompt 纪律已被实测证明不够）
+- **首夜弃票规则**（config.ALLOW_R1_ABSTAIN，可关）：第 1 天无查验信息时允许投 abstain 弃票——抑制 R1 零信息抱团误杀（S09 实测：R1 误杀村民+女巫盲毒好人 → 1 轮即败）；平票重投不含弃票
+- **空响应有界重试**：deepseek-reasoner 的 CoT 计入 max_tokens，耗尽即返回空内容——检测到空响应先以 8000（reasoner 硬顶）重试一次，仍空再降级到 chat 模型救援，最后才用模板（实测 fallback ~3.2/局 → ≤2/局）
+- **预言家声明工程**：查杀必须附完整逐轮查验链自证（Werewolf Arena, arXiv:2407.13943 —— 空泛声明 Backfired 率高，细节充分的声明 Believed% 最高）；全金水保持隐藏
+- **信息隐藏**：Agent 本地不存放全员真实身份表，狼人队友通过开局私密频道告知，信念仅由公开信息与私有查验构建
 - **认知边界**：明文禁止编造行为观察（"表情""眼神"等），只能从文本证据推理
 - **9 种人格**：分析型、激进型、保守型、逻辑型、直觉型、质疑型、调和型、策略型、表现型
 
@@ -51,10 +60,10 @@
 | 层级               | 技术                                                         |
 | ------------------ | ------------------------------------------------------------ |
 | **语言**     | Python 3.10+                                                 |
-| **LLM**      | DeepSeek API（`deepseek-chat`），通过 OpenAI 兼容 SDK 调用 |
+| **LLM**      | DeepSeek API，按任务路由：`deepseek-reasoner`（发言）/ `deepseek-chat`（投票与夜间行动） |
 | **后端**     | Flask + SSE（Server-Sent Events）实时推送                    |
 | **前端**     | 原生 HTML + CSS + JavaScript，无框架依赖                     |
-| **数据模型** | Pydantic 结构化输出（投票/查验/毒杀/猎人开枪）               |
+| **数据模型** | Pydantic 结构化输出（投票/查验/女巫行动/猎人开枪）           |
 | **异步**     | asyncio（游戏主循环 + 并行 Agent 调用）                      |
 | **内存**     | 正则 SpeechSummary 压缩（零额外 LLM 开销）                   |
 
@@ -66,7 +75,7 @@
 
 ```
                     ┌──────────────┐
-    原始消息 ──→    │  Perception  │  正则 + 关键词分类 → GameEvent
+    原始消息 ──→     │   Perception │  正则 + 关键词分类 → GameEvent
                     └──────┬───────┘
                            ↓
                     ┌──────────────┐
@@ -191,6 +200,7 @@ WolfGame/
 ├── human_agent.py        # 终端版人类玩家
 ├── main.py               # 命令行入口 (god/player模式)
 ├── server.py             # Web平台入口
+├── analyze.py            # 跨局胜率统计 (读取 game_data/)
 ├── requirements.txt      # openai numpy shortuuid flask pydantic
 ├── README.md
 └── web_ui/
@@ -220,3 +230,30 @@ python server.py
 ```
 
 打开 http://localhost:5000 → 选择「上帝模式」观战或「玩家模式」参与。
+
+```bash
+# 也可以：终端上帝模式 / 终端玩家模式
+python main.py          # 上帝模式观战（含主持人播报）
+python main.py player   # 人类 + 8 AI（选择的身份保证生效）
+
+# 多局之后查看阵营/角色胜率统计
+python analyze.py -v
+```
+
+---
+
+## 研究依据
+
+本项目的关键智能体机制均有公开研究支撑，改动前先查证、不主观臆断：
+
+| 机制 | 文献 |
+| ---- | ---- |
+| 好人跟票唯一预言家查杀（共识形成） | [LSPO: Learning Strategic Language Agents with Iterative Latent Space Policy Optimization](https://arxiv.org/abs/2502.04686) — 预言家带队统一投票是训练后涌现的好人最高胜率策略 |
+| 跳身份时机与查验链自证 | [Werewolf Arena (Google)](https://arxiv.org/abs/2407.13943) — 无沟通好人胜率仅 1.2%；细节充分的延迟声明 Believed% 最高、Backfired% 最低 |
+| 反事实证据自检 | [CaM-Wolf](https://arxiv.org/abs/2607.26393) — 前提移除干预验证证据因果性，消融对好人阵营影响最大；[Beyond Survival](https://arxiv.org/abs/2510.11389) — Counterfactual Trade-off 评估维度 |
+| 无证据怀疑的误伤率 | [WOLF](https://arxiv.org/abs/2512.09187) — 7320 条发言统计：对说真话村民的怀疑稳定于 44-46% |
+| 显式投票承诺行（言行一致） | [Doing What They Say](https://arxiv.org/abs/2606.00476) — 机器可校验承诺将结论→行动不一致率从 ~25% 降至 ~2% |
+| 指控者 vs 指控内容的信念偏移 | [Do LLMs Trust the Accuser or the Accusation?](https://arxiv.org/abs/2609.12446) — 对跳分辨规则的依据 |
+| 权威事实账本（工作记忆外置） | [CoALA](https://arxiv.org/abs/2309.02427) — 工作记忆应是 LLM 外的数据结构而非上下文残片；[An Implementation of Werewolf Agent That does not Truly Trust LLMs](https://arxiv.org/abs/2409.01575) — 游戏状态由规则层持有、LLM 只负责表述；[Lost in the Middle](https://arxiv.org/abs/2307.03172) — 关键事实置于 prompt 首尾位置 |
+| 查验链交叉验证（编造查验的确定性识破） | [Werewolf Arena](https://arxiv.org/abs/2407.13943) — 查验链细节是对跳分辨的核心依据；本项目将其从"靠 LLM 主观比较"硬化为"规则层对照死亡记录的可证明矛盾" |
+| 女巫首夜禁毒（规则干预） | 官方策略共识 + 实测 EV：零信息盲毒 3/8 命中狼、5/8 误杀好人，期望为负（S09：R1 盲毒好人，1 轮即败） |

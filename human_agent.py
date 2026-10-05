@@ -12,6 +12,7 @@ from typing import Any
 from _vendor import Msg
 from agent import PlayerAgent
 from reasoning import GameEvent, EventType, WorkingMemory
+import config
 
 
 class HumanAgent(PlayerAgent):
@@ -76,9 +77,14 @@ class HumanAgent(PlayerAgent):
         for i, p in enumerate(alive):
             if p != self.name:
                 print(f"  {i+1}. {p}")
+        if self.wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN:
+            print("  0. 弃票（abstain，本轮无人出局）")
         print("输入玩家名投票:")
         target = await asyncio.get_event_loop().run_in_executor(None, input)
         target = target.strip()
+        if target in ("0", "abstain", "弃票") and self.wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN:
+            return Msg(name=self.name, content="abstain", role="assistant",
+                       metadata={"vote": "abstain", "human": True})
         if target not in alive or target == self.name:
             print("无效目标，随机选择")
             others = [p for p in alive if p != self.name]
@@ -96,9 +102,8 @@ class HumanAgent(PlayerAgent):
         print(f"[{label}] {self.name} | 身份: {role} | 第{wm.round_num}轮")
         print(f"存活: {', '.join(alive)}")
         if role == "werewolf":
-            mates = [p for p in alive
-                     if self.state.get("name_to_role", {}).get(p) == "werewolf"
-                     and p != self.name]
+            mates = [m for m in self.wm.my_teammates
+                     if m in alive and m != self.name]
             print(f"狼队友: {', '.join(mates) if mates else '无'}")
             targets = [p for p in alive if p not in mates and p != self.name]
             print(f"可选目标: {', '.join(targets)}")

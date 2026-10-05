@@ -241,6 +241,13 @@ class EchoAgent(AgentBase):
         await async_print(self=self,msg=msg)
         return msg
 
+    async def __call__(self, content: str) -> Msg:
+        """game.py calls the moderator as `await moderator(text)` — route
+        through reply() so the narration is actually printed to the console.
+        (The base AgentBase.__call__ built the Msg WITHOUT printing, which
+        silently swallowed all night/day/vote narration in console mode.)"""
+        return await self.reply(content)
+
     async def handle_interrupt(
         self,
         *args: Any,

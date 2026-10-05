@@ -37,6 +37,7 @@ from memory import (
     SpeechSummary, extract_speech_facts,
     format_speech_summaries, format_round_summary,
 )
+import config
 
 StateDictType = Dict[str, Any]
 
@@ -56,12 +57,20 @@ class PlayerAgent(ReActAgentBase):
         super().__init__()
         self.name = name
 
-        # LLM Backend
+        # LLM Backend — task-based routing (not cascading):
+        #   - reasoner: discussion speeches (long, stylistic, strategic)
+        #   - chat:     votes / night actions (short structured decisions)
+        # Research on agentic model routing shows upfront task routing beats
+        # per-call escalation cascades, which restart at every agent step.
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY not set")
         self.model = OpenAIChatModel(
             model_name="deepseek-reasoner", api_key=api_key, stream=False,
+            client_kwargs={"base_url": "https://api.deepseek.com"},
+        )
+        self.fast_model = OpenAIChatModel(
+            model_name="deepseek-chat", api_key=api_key, stream=False,
             client_kwargs={"base_url": "https://api.deepseek.com"},
         )
         self.formatter = DeepSeekMultiAgentFormatter()
@@ -75,10 +84,12 @@ class PlayerAgent(ReActAgentBase):
         # Persona (randomly assigned, unique per agent)
         self.persona: Persona = random.choice(PERSONAS)
 
-        # Legacy state (game.py compatibility)
+        # Legacy state (game.py compatibility).
+        # NOTE: no "name_to_role" here on purpose — agents must never hold the
+        # ground-truth role map. Werewolf teammates arrive via TEAM_INFO only.
         self.state: Dict[str, Any] = {
             "role": None, "camp": None, "game_phase": None,
-            "is_alive": True, "name_to_role": {},
+            "is_alive": True,
             "current_alive": [], "dead_players": [],
             "night_killed": None, "witch_healing_used": False,
             "witch_poison_used": False, "seer_checked": {},
@@ -147,6 +158,12 @@ class PlayerAgent(ReActAgentBase):
             role = content.split("your role is")[-1].strip().strip(".")
             return GameEvent(EventType.ROLE_ASSIGNED, speaker="Moderator",
                            target=self.name, metadata={"role": role})
+        # Werewolf teammate notification (private channel)
+        if "你的狼队友是" in content or "your werewolf teammates are" in content.lower():
+            mates = re.findall(r'(Player\d+)', content.split("狼队友是")[-1]
+                               if "狼队友是" in content else content)
+            return GameEvent(EventType.TEAM_INFO, speaker="Moderator",
+                           target=self.name, metadata={"teammates": mates})
         # Phase changes
         if "天黑了" in content or "Night has fallen" in content:
             return GameEvent(EventType.PHASE_CHANGE, speaker="Moderator",
@@ -200,6 +217,12 @@ class PlayerAgent(ReActAgentBase):
         # Vote result
         if "投票结果为" in content:
             return GameEvent(EventType.VOTE_RESULT, speaker="Moderator", content=content[:200])
+        # Full vote detail: "投票明细: Player1→Player7, Player2→Player1, ..."
+        if "投票明细" in content:
+            pairs = re.findall(r'(Player\d+)\s*[→\->]+\s*(Player\d+)', content)
+            if pairs:
+                return GameEvent(EventType.VOTE_DETAIL, speaker="Moderator",
+                               metadata={"votes": {v: t for v, t in pairs}})
         return None
 
     def _parse_player_list(self, c: str) -> GameEvent:
@@ -247,7 +270,12 @@ class PlayerAgent(ReActAgentBase):
             wm.round_num = 0
             all_p = [f"Player{i}" for i in range(1, 10)]
             self.bt = BeliefTracker(self.name)
-            self.bt.initialize(all_p, role, self.state.get("name_to_role", {}))
+            self.bt.initialize(all_p, role)
+
+        elif et == EventType.TEAM_INFO:
+            wm.my_teammates = list(event.metadata.get("teammates", []))
+            if self.bt:
+                self.bt.mark_teammates(wm.my_teammates)
 
         elif et == EventType.PHASE_CHANGE:
             wm.phase = event.metadata["phase"]
@@ -265,9 +293,14 @@ class PlayerAgent(ReActAgentBase):
                     wm.alive_players.remove(p)
             wm.night_killed = event.metadata["players"][0] if event.metadata["players"] else ""
             if self.bt:
+                # Only roles THIS agent legitimately knows: itself, its seer
+                # checks, and wolf teammates. Never the ground-truth role map.
+                known_roles = {self.name: wm.my_role, **wm.seer_checks}
+                for mate in wm.my_teammates:
+                    known_roles[mate] = "werewolf"
                 for p in event.metadata["players"]:
                     self.bt.observe_night_death(
-                        p, self.state.get("name_to_role", {}),
+                        p, known_roles,
                         wm.alive_players, wm.round_num)
 
         elif et == EventType.PLAYER_ELIMINATED:
@@ -295,6 +328,16 @@ class PlayerAgent(ReActAgentBase):
                 is_alive = event.speaker in wm.alive_players
                 self.bt.observe_speech(event.speaker, event.content, is_alive, wm.round_num)
 
+        elif et == EventType.VOTE_DETAIL:
+            # Feed the full voter→target map into the belief tracker so
+            # bandwagon / lone-vote evidence is actually recorded.
+            if self.bt:
+                votes = event.metadata.get("votes", {})
+                from collections import Counter
+                counts = dict(Counter(votes.values()))
+                for voter, target in votes.items():
+                    self.bt.observe_vote(voter, target, counts, wm.round_num)
+
         elif et == EventType.GAME_OVER:
             wm.phase = "game_over"
 
@@ -320,6 +363,12 @@ class PlayerAgent(ReActAgentBase):
                 summary = extract_speech_facts(sender, content)
                 summary.round_num = r
                 self._speech_summaries.append(summary)
+                # Feed role claims into the belief tracker
+                if self.bt and summary.claims:
+                    claim_map = {"自称预言家": "seer", "自称女巫": "witch", "自称猎人": "hunter"}
+                    for c in summary.claims:
+                        if c in claim_map:
+                            self.bt.observe_role_claim(sender, claim_map[c], r)
 
         elif event.type in (EventType.NIGHT_DEATH, EventType.PLAYER_ELIMINATED):
             entry = MemoryEntry(EntryType.DEATH, r, "Moderator", content, importance=5,
@@ -402,18 +451,38 @@ class PlayerAgent(ReActAgentBase):
             stated = self._stated_vote
             alive = self.wm.alive_players
             role = self.wm.my_role
+            # Village-camp vote coordination (research basis — LSPO,
+            # arXiv:2502.04686): the emergent highest-win-rate villager
+            # strategy is a SINGLE seer claimant leading a unified vote on
+            # their kill target. A seer claim may surface AFTER my speech,
+            # so the stated-vote shortcut must yield to this newer, stronger
+            # public evidence. Narrow gate: exactly one claimant, target
+            # alive, I am not that seer, I am not a wolf.
+            if role != "werewolf" and role != "seer":
+                claimants, kills = self._seer_claim_intel()
+                if len(claimants) == 1:
+                    seer = next(iter(claimants))
+                    # Gate: a claimed chain that contradicts the engine death
+                    # record is a provable fake — never let it steer the vote.
+                    if self._chain_contradictions(seer):
+                        print(f"[{self.name}] {seer}查验链与死亡记录矛盾，不跟票")
+                    else:
+                        targets = [t for t in kills.get(seer, [])
+                                   if t in alive and t != self.name]
+                        if targets and stated != targets[0]:
+                            print(f"[{self.name}] 改投唯一预言家{seer}的查杀{targets[0]}（原声明{stated}）")
+                            return self._decision_to_plan(mode, targets[0])
             # Validate: must be alive, not self, not wolf teammate
             if stated in alive and stated != self.name:
                 mates = self._get_wolf_mates(alive) if role == "werewolf" else []
                 if stated not in mates:
                     print(f"[{self.name}] 投票 → {stated} (发言已声明)")
-                    _emit_web("vote", {"voter": self.name, "target": stated})
                     return self._decision_to_plan(mode, stated)
                 else:
                     print(f"[{self.name}] 发言声明投队友{stated}，改LLM决定")
 
         prompt = self._build_decision_prompt(mode)
-        text = await self._llm(prompt, max_t=600, temp=0.7)
+        text = await self._llm(prompt, max_t=600, temp=0.7, fast=True)
         # Split reasoning and decision
         reasoning, decision = self._split_reasoning(text)
         if reasoning:
@@ -448,24 +517,33 @@ class PlayerAgent(ReActAgentBase):
     async def _discuss(self, is_last_words: bool = False) -> Dict[str, Any]:
         """Two-pass discussion: internal reasoning → public speech."""
         prompt = self._build_discussion_prompt(is_last_words)
-        text = await self._llm(prompt, max_t=1500, temp=0.9)
+        # deepseek-reasoner counts chain-of-thought against max_tokens —
+        # 1500 was frequently exhausted by the CoT, returning EMPTY content
+        # (~20% of speeches fell back in observed games). Give the CoT room.
+        text = await self._llm(prompt, max_t=4000, temp=0.9)
         if not text or len(text) < 10:
             print(f"[{self.name}] WARNING: LLM empty, using fallback")
-            return self._fallback_plan()
+            return self._fallback_plan(is_last_words=is_last_words)
 
         # Split internal reasoning from public speech
         internal, public = self._split_internal_public(text)
         if internal:
             print(f"[{self.name}] 内部: {internal[:150]}")
+
+        # Extract stated vote target from RAW speech (before cleaning/truncation).
+        # Research basis (arXiv:2606.00476): machine-checkable explicit commitments
+        # cut conclusion→action inconsistency from ~25% to ~2%. Priority:
+        #   1. Explicit "投票意向: PlayerX" line (last one wins)
+        #   2. Last FIRST-PERSON declaration ("我投X" / "本轮我投票给X")
+        # Never extract from descriptions of OTHER players' votes.
+        self._stated_vote = self._extract_stated_vote(public)
+
         public = self._clean_text(public)
+        # Keep the commitment line if truncation cut it off
+        if self._stated_vote and "投票意向" not in public:
+            public = public.rstrip("。！？!?.") + f"\n投票意向: {self._stated_vote}"
         print(f"[{self.name}] {public}")
         _emit_web("speech", {"player": self.name, "content": public})
-
-        # Extract stated vote target from speech for consistency enforcement
-        self._stated_vote = None
-        vm = re.search(r'(?:投|投票给|我投|票给)\s*(Player\d)', public)
-        if vm:
-            self._stated_vote = vm.group(1)
 
         self.memory.add(MemoryEntry(
             EntryType.MY_SPEECH, self.wm.round_num, self.name, public,
@@ -491,6 +569,28 @@ class PlayerAgent(ReActAgentBase):
         if len(lines) >= 2:
             return lines[0], '\n'.join(lines[1:])
         return '', text
+
+    @staticmethod
+    def _extract_stated_vote(speech: str) -> str | None:
+        """Extract MY declared vote target from my own speech.
+
+        Only matches explicit commitments, never descriptions of others:
+          1. "投票意向: PlayerX" machine-checkable line (last occurrence)
+          2. First-person declaration, e.g. "我投Player3" / "本轮我投票给Player3"
+             (last occurrence — declarations usually come at the end)
+        """
+        if not speech:
+            return None
+        m = re.findall(r'投票意向\s*[:：]?\s*(Player\d+)', speech)
+        if m:
+            return m[-1]
+        m = re.findall(
+            r'(?:我|本轮|今天|这轮)[^。！？!?\n]{0,12}?(?:投(?:票|死|出)?|票)(?:给|向)?\s*(Player\d+)',
+            speech,
+        )
+        if m:
+            return m[-1]
+        return None
 
     # Prompt Builders — personalized + full context
 
@@ -520,22 +620,54 @@ class PlayerAgent(ReActAgentBase):
                 forbid.append(f"禁止重复查验: {', '.join(already)}")
         forbid_block = "\n".join(f"❌ {f}" for f in forbid) if forbid else ""
 
-        # ── Summaries ──
-        summaries = format_speech_summaries(self._speech_summaries, max_per_round=20)
-        if not summaries.strip():
-            summaries = "暂无讨论"
+        # ── Summaries (bounded: current round full, past rounds one line
+        # each — keeps prompts lean as games lengthen; context rot research:
+        # Anthropic "Effective context engineering for AI agents", 2025) ──
+        cur_sum = [s for s in self._speech_summaries
+                   if s.round_num == wm.round_num]
+        past_sum = [s for s in self._speech_summaries
+                    if s.round_num < wm.round_num]
+        sum_parts = []
+        if past_sum:
+            by_round: Dict[int, list] = {}
+            for s in past_sum:
+                by_round.setdefault(s.round_num, []).append(s)
+            for r in sorted(by_round):
+                line = format_round_summary(by_round[r])
+                if line:
+                    sum_parts.append(f"第{r}轮摘要: {line}")
+        if cur_sum:
+            sum_parts.append(
+                "本轮发言:\n" + format_speech_summaries(cur_sum, max_per_round=12)
+            )
+        summaries = "\n".join(sum_parts) if sum_parts else "暂无讨论"
 
         # ── Body (mode-specific) ──
         if mode == "vote":
             my_speeches = self.memory.my_speeches()
             last_speech = my_speeches[-1] if my_speeches else ""
             my_speech_block = f"你发言说过: 「{last_speech[:150]}」\n" if last_speech else ""
+            seer_intel = self._seer_claim_block() if role != "werewolf" else ""
+            seer_intel_block = f"{seer_intel}\n" if seer_intel else ""
+            # R1 abstain hint (config-gated): the structured vote model
+            # accepts "abstain" in round 1 (config.ALLOW_R1_ABSTAIN) — tell
+            # the agent here so its decision can use it deliberately.
+            if role != "werewolf" and self.wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN:
+                seer_intel_block += (
+                    "ℹ️ 第1轮弃票规则: 第1天无查验、无证据时，你可以投 abstain（弃票）。"
+                    "有明确证据就正常投。无证据弃票是保留信息的合理选择。\n"
+                )
+            ledger = self._ledger_block()
+            ledger_block = f"\n{ledger}\n" if ledger else ""
             body = (
                 f"存活玩家: {', '.join(alive)}\n"
                 f"{my_speech_block}"
+                f"{seer_intel_block}"
                 f"❌ 禁止投自己！禁止投已死玩家！\n"
                 f"投票必须与发言一致！发言说投谁就投谁。\n"
-                f"讨论摘要:\n{summaries}"
+                f"（例外：发言后若唯一预言家报了查杀，跟票查杀对象是好人最高胜率策略，优于你的次要怀疑。）\n"
+                f"讨论摘要:\n{summaries}\n"
+                f"{ledger_block}"
             )
         elif mode == "night":
             body = f"{self._night_role_body()}"
@@ -547,7 +679,7 @@ class PlayerAgent(ReActAgentBase):
         # ── Format ──
         fmt = "推理: (一句话)\n决策: [玩家名]"
         if role == "witch" and mode == "night":
-            fmt = "推理: (一句话)\n决策: resurrect 或 poison:玩家名 或 none"
+            fmt = "推理: (一句话)\n决策: resurrect 或 poison:玩家名 或 resurrect+poison:玩家名 或 none"
 
         return (
             f"{identity}\n"
@@ -557,10 +689,222 @@ class PlayerAgent(ReActAgentBase):
         )
 
     def _get_wolf_mates(self, alive: list) -> list:
-        """Get alive wolf teammates (excluding self)."""
-        return [p for p in alive
-                if self.state.get("name_to_role", {}).get(p) == "werewolf"
-                and p != self.name]
+        """Get alive wolf teammates (excluding self).
+
+        Teammates come from the private TEAM_INFO channel (wm.my_teammates),
+        never from a ground-truth role map held locally.
+        """
+        return [m for m in self.wm.my_teammates
+                if m in alive and m != self.name]
+
+    def _seer_claim_intel(self) -> tuple:
+        """Scan speech summaries for seer claims and their kill targets.
+
+        Returns (claimants, kills):
+          claimants — set of alive speakers who publicly claimed 预言家
+          kills     — {claimant: [alive players they accused as werewolf]}
+
+        Used for village-side vote coordination. Research basis:
+        - LSPO (arXiv:2502.04686): the emergent highest-win-rate villager
+          strategy is a single seer claimant coordinating a unified vote.
+        - Werewolf Arena (arXiv:2407.13943): believability of the claim
+          (check-chain detail) decides whether coordination helps or
+          backfires — hence the caller must compare claimants when >1.
+        Dead claimants are dropped: their info was already acted on or died
+        with them, and "following" a dead claimant's target is exploitable.
+        """
+        alive = self.wm.alive_players
+        claimants = set()
+        kills: Dict[str, list] = {}
+        for s in self._speech_summaries:
+            if s.speaker not in alive or s.speaker == self.name:
+                continue
+            if any("预言家" in c for c in s.claims):
+                claimants.add(s.speaker)
+        for c in claimants:
+            targets = []
+            for s in self._speech_summaries:
+                if s.speaker != c:
+                    continue
+                for a in s.accusations:
+                    if a in alive and a != self.name and a not in targets:
+                        targets.append(a)
+            kills[c] = targets
+        return claimants, kills
+
+    def _chain_contradictions(self, claimant: str) -> list:
+        """Cross-validate a seer claimant's claimed check chain against the
+        engine-pushed death timeline in WorkingMemory.public_ledger.
+
+        Deterministic, LLM-free: a claim of "第R轮查PlayerX" where PlayerX
+        was already dead BEFORE night R (died in any round d < R) is a
+        provable impossibility — the real seer checks living players only.
+        Conservative by design: deaths in the SAME round as the claimed
+        check (d == R) are never flagged, because a night-R check precedes
+        the day-R lynch and may coincide with the night-R wolf kill.
+
+        Research basis: Werewolf Arena (arXiv:2407.13943) — check-chain
+        detail is THE discriminator villagers use between competing seer
+        claims; a fake chain is checkable against the public record, the
+        same grounding principle as the ledger (arXiv:2409.01575: state
+        lives in the rule layer, LLM claims are verified against it).
+
+        Returns a list of human-readable impossibility strings (empty =
+        chain consistent with the record, or no dated checks found).
+        """
+        wm = self.wm
+        if not wm.public_ledger:
+            return []
+        # Player → round they died in (first death wins)
+        died_at: Dict[str, int] = {}
+        for e in wm.public_ledger:
+            for p in (e.get("night_deaths") or []):
+                died_at.setdefault(p, e["round"])
+            if e.get("lynched"):
+                died_at.setdefault(e["lynched"], e["round"])
+            for p in (e.get("day_deaths") or []):
+                died_at.setdefault(p, e["round"])
+        # Claimant's own speeches (full text kept in memory entries)
+        texts = [
+            e.content for e in self.memory.entries
+            if e.speaker == claimant
+            and e.type in (EntryType.SPEECH, EntryType.MY_SPEECH)
+        ]
+        bad = []
+        for t in texts:
+            # "第R轮查(验)PlayerX" — with round dating
+            for m in re.finditer(r'第\s*(\d+)\s*轮[^。！？!?\n]{0,15}?查(?:验)?[^。！？!?\n]{0,8}?(Player\d+)', t):
+                r = int(m.group(1))
+                tgt = m.group(2)
+                d = died_at.get(tgt)
+                if d is not None and d < r:
+                    bad.append(f"{claimant}声称第{r}轮查验{tgt}，但{tgt}第{d}轮已出局——对死人查验是不可能的，该查验链系编造")
+            # "查(验)PlayerX（第R轮）" — round in trailing parentheses
+            for m in re.finditer(r'查(?:验)?\s*(Player\d+)[^。！？!?\n]{0,4}?第\s*(\d+)\s*轮', t):
+                tgt = m.group(1)
+                r = int(m.group(2))
+                d = died_at.get(tgt)
+                if d is not None and d < r:
+                    bad.append(f"{claimant}声称第{r}轮查验{tgt}，但{tgt}第{d}轮已出局——对死人查验是不可能的，该查验链系编造")
+        return bad
+
+    def _seer_claim_block(self) -> str:
+        """Dynamic seer-claim intel line for prompts (all camps see claims)."""
+        claimants, kills = self._seer_claim_intel()
+        if not claimants:
+            return ""
+        if len(claimants) == 1:
+            seer = next(iter(claimants))
+            targets = kills.get(seer, [])
+            t_str = f"，查杀 {', '.join(targets)}" if targets else "（尚未报查杀）"
+            # Deterministic chain×death-record cross-validation
+            contra = self._chain_contradictions(seer)
+            if contra:
+                return (
+                    f"【神职信息】{seer} 是目前唯一跳预言家的玩家{t_str}。\n"
+                    f"⚠️ 查验链交叉验证（对照【权威记录】死亡时间线，确定性结论）:\n"
+                    + "\n".join(f"- {c}" for c in contra)
+                    + "\n查验链与公开死亡记录矛盾→TA几乎必是假预言家（狼），不要跟票其查杀对象。"
+                )
+            return (
+                f"【神职信息】{seer} 是目前唯一跳预言家的玩家{t_str}。"
+                f"无对跳→声明可信度较高（且已通过死亡记录交叉验证），好人应集中投其查杀对象。"
+            )
+        detail_parts = []
+        contra_map = {}
+        for c in sorted(claimants):
+            contra = self._chain_contradictions(c)
+            contra_map[c] = contra
+            tag = " ⚠️查验链与死亡记录矛盾" if contra else ""
+            detail_parts.append(f"{c}查杀{', '.join(kills.get(c, [])) or '无'}{tag}")
+        detail = "；".join(detail_parts)
+        lines = [
+            f"【神职信息】{len(claimants)}人对跳预言家: {detail}。",
+            f"分辨真伪: 报得出逐轮完整查验链(第R轮查X=结果)的更可信；"
+            f"只喊查杀报不出查验链的大概率是狼。",
+        ]
+        flagged = [c for c in sorted(claimants) if contra_map[c]]
+        if flagged:
+            lines.append("⚠️ 查验链交叉验证（对照【权威记录】，确定性结论）:")
+            for c in flagged:
+                for s in contra_map[c]:
+                    lines.append(f"- {s}")
+            if len(flagged) < len(claimants):
+                lines.append(f"查验链与死亡记录矛盾者必是假预言家——跟票 {'、'.join(c for c in sorted(claimants) if not contra_map[c])} 的查杀对象。")
+            else:
+                lines.append("两人查验链都与死亡记录矛盾——都不可信，勿跟任何一方的查杀。")
+        return "\n".join(lines)
+
+    def _ledger_block(self) -> str:
+        """Authoritative public record, rendered verbatim from the
+        engine-pushed ground truth in WorkingMemory.public_ledger.
+
+        Research basis:
+        - CoALA (arXiv:2309.02427): working memory should be a data
+          structure written outside the LLM and READ into prompts — not the
+          LLM's own recollection of scrolled context.
+        - 'Werewolf Agent That does not Truly Trust LLMs'
+          (arXiv:2409.01575): game state must live outside the LLM; the LLM
+          only verbalizes it. (Eval game 10: an agent "remembered" a vote
+          that never happened and lynched the hunter on it.)
+        - Lost in the Middle (arXiv:2307.03172): critical facts go near the
+          END of the prompt — callers append this block late.
+
+        Also derives said-vs-cast mismatches (stated 投票意向 in speeches vs
+        engine-recorded votes) — the classic human 'flip-flop' wolf signal.
+        Only the first ballot is compared: re-votes have restricted
+        candidates, so flips there are expected.
+        """
+        wm = self.wm
+        if not wm.public_ledger:
+            return ""
+        lines = [
+            "【权威记录】游戏引擎实况，绝对准确。凡引用历史投票/死亡必须照抄此表，"
+            "禁止凭记忆复述或推测（记忆会出错，此表不会）。"
+        ]
+        for e in sorted(wm.public_ledger, key=lambda x: x["round"]):
+            seg = [f"第{e['round']}轮"]
+            nd = e.get("night_deaths") or []
+            seg.append(f"夜死:{','.join(nd) if nd else '无'}")
+            votes = e.get("votes") or {}
+            if votes:
+                seg.append("投票:" + ",".join(f"{v}→{t}" for v, t in votes.items()))
+            if e.get("tie"):
+                seg.append(f"平票:{'/'.join(e['tie'])}")
+            rc = e.get("revote_counts") or {}
+            if rc:
+                seg.append("重投:" + ",".join(f"{k}×{v}" for k, v in rc.items()))
+            if votes or e.get("tie"):
+                lynched = e.get("lynched")
+                seg.append(f"出局:{lynched}" if lynched else "出局:无")
+            extra_day = [p for p in (e.get("day_deaths") or [])
+                         if p != e.get("lynched")]
+            if extra_day:
+                seg.append(f"白天死亡:{','.join(extra_day)}")
+            lines.append(" | ".join(seg))
+        # Said-vs-cast mismatches
+        mismatches = []
+        for e in wm.public_ledger:
+            votes = e.get("votes") or {}
+            rnd = e["round"]
+            for voter, target in votes.items():
+                if voter == self.name:
+                    continue
+                stated = None
+                for s in self._speech_summaries:
+                    if s.speaker == voter and s.round_num == rnd and s.stated_vote:
+                        stated = s.stated_vote  # last one wins
+                if stated and stated != target:
+                    mismatches.append(
+                        f"{voter}第{rnd}轮声称投{stated}、实际投{target}"
+                    )
+        if mismatches:
+            lines.append(
+                "【言行不一】声称投票≠实际投票"
+                "（可能是听完发言后合理改票，需其本人解释；解释不清的才是狼信号）："
+            )
+            lines.append("；".join(mismatches[-8:]))
+        return "\n".join(lines)
 
     def _night_role_body(self) -> str:
         wm = self.wm
@@ -569,8 +913,8 @@ class PlayerAgent(ReActAgentBase):
 
         if role == "werewolf":
             mates = self._get_wolf_mates(alive)
-            dead_mates = [p for p in wm.dead_players
-                         if self.state.get("name_to_role", {}).get(p) == "werewolf"]
+            dead_mates = [m for m in wm.my_teammates
+                         if m in wm.dead_players and m != self.name]
             non_wolves = [p for p in alive if p not in mates and p != self.name]
             mate_str = f"队友: {', '.join(mates)}" if mates else "你没有队友了！"
             dead_str = f"（已死队友: {', '.join(dead_mates)}）" if dead_mates else ""
@@ -601,27 +945,43 @@ class PlayerAgent(ReActAgentBase):
             h_ok = not wm.healing_used
             p_ok = not wm.poison_used
             nk = wm.night_killed
+            # Night-1 poison hard ban: with zero information, blind poison
+            # hits a wolf only 3/8 vs 5/8 a villager — negative EV (prompt
+            # discipline alone failed in S09). Enforced again in
+            # _parse_target so the LLM cannot bypass it.
+            poison_banned = wm.round_num <= 1
             # Build candidate list for poison (all alive except self, and except saved player)
             poison_candidates = [p for p in alive if p != self.name]
             poison_list = ", ".join(poison_candidates) if poison_candidates else "无"
-            if nk == self.name:
-                heal = f"\n你被狼袭击了！不能自救。"
-                heal += f"\n毒药可选: {poison_list}"
-                heal += f"\n回复: none（不用毒） 或 poison:玩家名"
-            elif h_ok and nk:
-                heal = f"\n今晚{nk}被杀。建议救TA。"
-                heal += f"\n毒药可选: {poison_list}"
-                heal += f"\n回复: resurrect（救人） 或 poison:玩家名 或 none（都不用）"
+            if poison_banned:
+                poison_line = "\n🚫 首夜禁毒（规则）: 第1夜信息量为零，毒药盲毒必是负期望，今晚禁止用毒。"
             else:
-                heal = f"\n毒药可选: {poison_list}"
-                heal += f"\n回复: poison:玩家名 或 none（不用毒）"
+                poison_line = f"\n毒药可选: {poison_list}"
+            if nk == self.name:
+                heal = f"\n你被狼袭击了！不能自救。{poison_line}"
+                heal += f"\n回复: none（不用毒）" + ("" if poison_banned else " 或 poison:玩家名")
+            elif h_ok and nk:
+                heal = f"\n今晚{nk}被杀。建议救TA。{poison_line}"
+                heal += f"\n回复: resurrect（救人） 或 none（都不用）" + (
+                    "" if poison_banned else "；也可 poison:玩家名 或 resurrect+poison:玩家名（边救边毒）"
+                )
+            else:
+                heal = poison_line
+                heal += f"\n回复: none（不用毒）" + ("" if poison_banned else " 或 poison:玩家名")
             strategy = ""
             if h_ok and wm.round_num == 1:
                 strategy = "\n策略提示: 第1轮被刀的很可能是好人，强烈建议救！"
             if p_ok and wm.round_num >= 2:
                 strategy += "\n策略提示: 毒药还没用，对高度怀疑的玩家使用。"
+            # Ground the poison decision in the authoritative record: voting
+            # coalitions and death timeline are the witch's ONLY evidence for
+            # a poison call — without them she was poisoning on vibes (S09:
+            # night-1 blind poison killed a villager, village lost in 1 round).
+            ledger = self._ledger_block()
+            ledger_block = f"\n{ledger}\n" if ledger else ""
             return (
-                f"【女巫】解药:{'可用' if h_ok else '已用'} 毒药:{'可用' if p_ok else '已用'}{heal}{strategy}"
+                f"【女巫】解药:{'可用' if h_ok else '已用'} 毒药:{'可用' if p_ok else '已用'}{heal}{strategy}\n"
+                f"用毒前必读【权威记录】——投票抱团/言行不一是唯一可靠证据，无证据就不用毒:{ledger_block}"
             )
         return "回复none。"
 
@@ -646,7 +1006,7 @@ class PlayerAgent(ReActAgentBase):
         if dead_list:
             lines.append(f"❌ 已死（禁止投/禁止杀/禁止查）: {', '.join(dead_list)}")
         if is_wolf:
-            mates = [p for p in alive if self.state.get("name_to_role", {}).get(p) == "werewolf" and p != self.name]
+            mates = self._get_wolf_mates(alive)
             if mates:
                 lines.append(f"❌ 你的狼队友（禁止杀/禁止投）: {', '.join(mates)}")
             lines.append(f"存活狼人: {len(mates)+1}个。杀队友=自杀。")
@@ -660,7 +1020,7 @@ class PlayerAgent(ReActAgentBase):
             lines.append(f"⚠️ 你是{self.name}，已被淘汰，这是遗言！")
         if wm.round_num <= 1:
             lines.append("⚠️ 这是第1轮，没有历史发言。不要编造'前几轮''之前他说过'等内容！")
-        lines.append("⚠️ 不要声称别人投了谁——除非你在投票记录里亲眼看到。不要说'X投了自己'除非你真的看到投票记录。")
+        lines.append("⚠️ 不要声称别人投了谁——除非【权威记录】里白纸黑字写着。记录里没有的说法就是编造，会被当场拆穿。")
         lines.append("⚠️ 如果有人自称预言家并给出查验结果（'PlayerX是狼人/好人'），不要直接否定说'没有依据'——查验本身就是依据！考虑TA可能是真预言家的可能性。观察有没有人能验证这个说法。")
 
         # ═══════════════════════════════════════════
@@ -694,19 +1054,10 @@ class PlayerAgent(ReActAgentBase):
             if past_lines:
                 past_context = "\n".join(past_lines[-5:])
 
-        # Vote history
-        vote_entries = [e for e in self.memory.entries if e.type == EntryType.VOTE]
-        vote_context = ""
-        if len(vote_entries) >= 2:
-            by_rnd = {}
-            for e in vote_entries:
-                by_rnd.setdefault(e.round_num, []).append(e)
-            vl = []
-            for r in sorted(by_rnd.keys()):
-                voters = [f"{v.speaker}→{v.content[:20]}" for v in by_rnd[r]]
-                vl.append(f"第{r}轮投票: {', '.join(voters)}")
-            if vl:
-                vote_context = "\n".join(vl[-5:])
+        # (The old "【投票记录】" block rendered Moderator→text garbage from
+        # VOTE entries and was a confabulation source — replaced by the
+        # authoritative _ledger_block(), appended near the end of the prompt
+        # per Lost-in-the-Middle placement.)
 
         # ═══════════════════════════════════════════
         # SECTION 3: STRATEGY + FORMAT (at end — recency)
@@ -752,23 +1103,28 @@ class PlayerAgent(ReActAgentBase):
                 format_line = (
                     f"🔴 你查到狼人: {', '.join(wolf_list)}！必须跳身份！\n"
                     f"内部: (跳预言家)\n"
-                    f"公开: 我是预言家，我查了{', '.join(wolf_list)}是狼人！所有人投票出TA！"
+                    f"公开: 我是预言家！查验链: {ck_list}。{', '.join(wolf_list)}是铁狼，"
+                    f"所有人跟我投{wolf_list[0]}！（报完整查验链自证，才不会被当成假预言家）\n"
+                    f"投票意向: {wolf_list[0]}"
                 )
             else:
                 format_line = (
                     f"你的查验记录: {ck_list}。"
                     + (f" {', '.join(good_list)}是好人，你必须在发言中保护TA、引导投票远离TA！" if good_list else "")
-                    + "\n内部: (策略)\n公开: (如果信息足够可跳身份，否则以村民视角保护查验的好人，指出怀疑对象+投谁)"
+                    + "\n内部: (策略)\n公开: (如果信息足够可跳身份，否则以村民视角保护查验的好人，指出怀疑对象+投谁)\n投票意向: (你要投的玩家，单独一行)"
                 )
         elif is_wolf:
             format_line = (
                 "内部: (伪装策略一句话)\n"
-                "公开: (以村民视角发言，指出怀疑对象+理由+投谁，60-150字)"
+                "公开: (以村民视角发言，指出怀疑对象+理由+投谁，60-150字)\n"
+                "投票意向: (你要投的玩家，单独一行)"
             )
         else:
             format_line = (
-                "内部: (策略一句话)\n"
-                "公开: (指出怀疑对象+理由+投谁，60-150字)"
+                "内部: (反事实自检: 我指控TA依赖的最关键证据是什么？去掉这条证据我还怀疑TA吗？若否→放弃指控)\n"
+                "公开: (指出怀疑对象+一条可验证证据[发言矛盾/投票抱团/死亡信息]+投谁，60-150字。"
+                "没有证据就分析局势，不要凭'感觉可疑'点名——无证据怀疑=替狼人刀人)\n"
+                "投票意向: (你要投的玩家，单独一行)"
             )
 
         # ── Assemble ──
@@ -782,10 +1138,16 @@ class PlayerAgent(ReActAgentBase):
             parts.append("")
         if past_context:
             parts.append(f"【历史摘要】\n{past_context}\n")
-        if vote_context:
-            parts.append(f"【投票记录】\n{vote_context}\n")
         parts.append(f"【本轮发言】第{pos}位\n{current_context}")
+        seer_intel = self._seer_claim_block()
+        if seer_intel:
+            parts.append(seer_intel)
         parts.append(f"\n【策略】\n{strategy}")
+        # Authoritative ledger AFTER strategy, right before the format
+        # section — recency position (Lost in the Middle, arXiv:2307.03172).
+        ledger = self._ledger_block()
+        if ledger:
+            parts.append(f"\n{ledger}")
         # Verification at the VERY END (recency bias — LLM sees this right before output)
         if verify_lines:
             parts.append(f"\n【‼️ 发布前必须检查：有人说了关于你的话，你私下知道真假！】")
@@ -795,7 +1157,15 @@ class PlayerAgent(ReActAgentBase):
         dead_warn_end = ""
         if wm.dead_players:
             dead_warn_end = f"\n⚠️ 已死玩家: {', '.join(wm.dead_players)}。你绝对不能投已死的人！只能投存活玩家。"
-        parts.append(f"\n【回复格式】\n{format_line}{dead_warn_end}")
+        parts.append(
+            f"\n【回复格式】\n{format_line}{dead_warn_end}"
+            f"\n‼️ 发言最后必须单独一行写「投票意向: PlayerX」（X为存活玩家、不能是自己）。"
+            f"投票环节将以此为准，必须与你的发言一致。"
+            f"引用历史投票或死亡信息时，必须照抄【权威记录】，一个字都不许改。"
+            f"\n‼️ 上面的规则是给你的分析纪律，不是发言内容：公开发言里禁止出现"
+            f"「照抄」「权威记录」「提示词」「规则」这类指令词，不要当众念记录表——"
+            f"直接用自己的话说出事实和推理。也禁止逐字复读其他玩家说过的话或提示中的措辞。"
+        )
 
         return "\n".join(parts)
 
@@ -810,6 +1180,7 @@ class PlayerAgent(ReActAgentBase):
                 "策略: 伪装村民视角发言，怀疑好人、保护队友。\n"
                 "投票时: 投你发言中怀疑的人，保持言行一致不暴露。"
             )
+        elif role == "seer":
             # Check if seer has found a wolf
             has_wolf_check = any(r == "werewolf" for r in self.wm.seer_checks.values())
             wolf_names = [n for n, r in self.wm.seer_checks.items() if r == "werewolf"]
@@ -822,18 +1193,20 @@ class PlayerAgent(ReActAgentBase):
             if has_wolf_check:
                 base += (
                     f"🔴 你已验证 {', '.join(wolf_names)} 是狼人！\n"
-                    "‼️ 本轮讨论必须跳身份！公开发言开头必须说:\n"
-                    f"'我是预言家，我查验了{', '.join(wolf_names)}是狼人！'\n"
-                    "然后带领好人投票出这个狼人。再不说就来不及了！\n"
+                    "‼️ 本轮讨论必须跳身份！公开发言必须包含:\n"
+                    f"1) '我是预言家' 2) 完整查验链（{check_list}，逐轮报出）\n"
+                    f"3) '所有人跟我投{wolf_names[0]}'——明确号召统一投票。\n"
+                    "查验链越完整越可信；只喊查杀不报查验链会被当成假预言家投死！\n"
                 )
             else:
                 base += (
                     "【跳身份时机】\n"
-                    "- 查到狼人 → 下一轮讨论必须立即跳！\n"
-                    "- 连续查到好人 → 第2-3轮可跳，建立信任网。\n"
-                    "- 跳身份风险: 当晚可能被狼杀，但信息能帮好人赢。\n"
+                    "- 查到狼人 → 下一轮讨论必须立即跳，报完整查验链！\n"
+                    "- 全是金水 → 保持隐藏！无查杀的空泛声明易被当假预言家投死，\n"
+                    "  且暴露后当晚会吃狼刀，信息随你进坟墓。\n"
+                    "- 例外: 你即将被投出局/残局决胜轮 → 跳出并报全部查验链自证。\n"
                     "【保护查证的好人】\n"
-                    "- 查验到好人→发言中为他辩护，引导投票远离他。\n"
+                    "- 查验到好人→发言中为他辩护，引导投票远离他（不暴露原因）。\n"
                 )
             base += (
                 "【识别假预言家】\n"
@@ -842,12 +1215,23 @@ class PlayerAgent(ReActAgentBase):
             )
             return base
         elif role == "witch":
+            silver = [s for s in self.wm.my_saves if s in self.wm.alive_players]
+            silver_line = (
+                f"【银水】你救过 {', '.join(silver)}——被狼刀的人大概率是好人（狼极少自刀），"
+                f"相当于你的半个金水。白天若有人要投TA→暗中为TA辩护、引导票远离，"
+                f"但绝不暴露你是女巫、不说'昨晚'之类的夜知信息。\n"
+                if silver else ""
+            )
             return (
                 "🎯 胜利条件: 所有狼人被淘汰（共3狼）。\n"
                 "数值推理: 游戏继续→狼人未达半数。根据存活人数可推算最多剩几只狼。\n"
                 "策略: 伪装村民，用夜间死亡信息暗中分析。第1轮必救。\n"
+                f"{silver_line}"
+                "【毒药纪律】毒药不可逆: 无信息盲毒命中狼的概率仅3/8，误杀好人5/8——期望为负！\n"
+                "  只在有明确狼证据（预言家查杀/投票抱团铁证）或残局锁定狼人时使用。\n"
                 "⚠️ 铁律: 不透露你是女巫。不说'昨晚谁死了'等暴露夜知信息的话。\n"
                 "❌ 绝对禁止假跳预言家！你是女巫不是预言家。假跳预言家=混淆好人=帮狼人赢！\n"
+                "【预言家声明响应】唯一预言家报查杀→跟票其查杀对象。对跳→跟查验链完整者。\n"
                 "发言中: 以村民视角分析，指出怀疑对象和理由，声明投票目标。\n"
                 "投票时: 投你发言中怀疑的人。"
             )
@@ -858,6 +1242,7 @@ class PlayerAgent(ReActAgentBase):
                 "策略: 伪装村民。你的威慑力在死后开枪。\n"
                 "❌ 铁律: 绝不假跳预言家！你是猎人不是预言家。假跳=混浠好人=帮狼赢！\n"
                 "如果有人正确说出了你是猎人→那个人是真预言家！你必须公开确认！\n"
+                "【预言家声明响应】唯一预言家报查杀→跟票其查杀对象。对跳→跟查验链完整者。\n"
                 "发言中: 以村民视角分析，指出怀疑对象和理由，声明投票目标。\n"
                 "投票时: 投你发言中怀疑的人。"
             )
@@ -866,19 +1251,36 @@ class PlayerAgent(ReActAgentBase):
                 "🎯 胜利条件: 所有狼人被淘汰（共3狼）。\n"
                 "数值推理: 游戏继续→狼人未达半数。只剩4人→最多1只狼！\n"
                 "你的武器是逻辑分析。用发言矛盾+投票记录+死亡信息推理。\n"
+                "【证据纪律】指控必须引用一条可验证证据（发言矛盾/投票抱团/死亡信息）。\n"
+                "  只有'感觉可疑''行为不自然'不是证据——凭感觉投票=替狼人刀人。\n"
+                "  反过来: 无证据就点名别人的人本身可疑——狼必须制造投票目标，\n"
+                "  第1轮无证据强打是唯一可验证的狼行为信号。\n"
+                "【预言家声明响应】\n"
+                "- 只有1人跳预言家并报查杀→默认跟随，投其查杀对象。好人票分散=失败主因。\n"
+                "- 2人对跳→比查验链：报得出逐轮查验记录(第R轮查X=结果)的更可信；\n"
+                "  只喊查杀报不出查验链的大概率是狼。\n"
                 "【投票分析】看投票记录找规律：如果某几个人每轮都投同一个目标，\n"
                 "  他们很可能是狼团队在统一冲票。分散的投票更像好人。\n"
                 "❌ 严禁假跳: 绝不说'我是预言家''我是女巫''我是猎人'！\n"
                 "   你假跳神职=帮狼人混淆视听=毁掉好人阵营。\n"
                 "✅ 你应该: 分析发言矛盾+投票抱团，指出最可疑的人。\n"
-                "发言中: 指出具体怀疑对象+分析理由+声明投谁。\n"
+                "发言中: 指出具体怀疑对象+具体证据+声明投谁。\n"
                 "投票时: 投你发言中怀疑的人。言行必须一致！"
             )
         return "分析局势，指出怀疑对象和理由。"
 
     # LLM Call
 
-    async def _llm(self, sys_prompt: str, max_t: int = 500, temp: float = 0.9) -> str:
+    async def _llm(self, sys_prompt: str, max_t: int = 500, temp: float = 0.9,
+                   fast: bool = False) -> str:
+        """Call the LLM. fast=True routes to the cheap chat model for short
+        structured decisions; default (reasoner) is used for speeches.
+
+        Timeouts: 25s was far too short for a reasoning model (~20% of calls
+        failed in observed games). Now 60s reasoner / 30s chat.
+        """
+        model = self.fast_model if fast else self.model
+        timeout = 30 if fast else 60
         try:
             formatted = await self.formatter.format([
                 Msg("system", sys_prompt, "system"),
@@ -888,13 +1290,39 @@ class PlayerAgent(ReActAgentBase):
             if not valid:
                 return ""
             resp = await asyncio.wait_for(
-                self.model(valid, temperature=temp, top_p=0.9, max_tokens=max_t),
-                timeout=25,
+                model(valid, temperature=temp, top_p=0.9, max_tokens=max_t),
+                timeout=timeout,
             )
+            text = self._extract_text(resp)
+            # Empty-response retry: deepseek-reasoner counts chain-of-thought
+            # against max_tokens — when the CoT exhausts the budget the API
+            # returns EMPTY content with finish_reason=length. Detected here
+            # and retried ONCE with the reasoner's hard cap (8000) before the
+            # caller ever sees the failure (observed: ~20% empty at max_t=1500,
+            # ~3% at 4000; one bounded retry costs ~5s, a fallback speech
+            # costs a round of low-quality discussion).
+            if not text and not fast and max_t < 8000:
+                print(f"[{self.name}] LLM empty response (CoT exhausted max_tokens), retrying with 8000")
+                resp = await asyncio.wait_for(
+                    model(valid, temperature=temp, top_p=0.9, max_tokens=8000),
+                    timeout=timeout,
+                )
+                text = self._extract_text(resp)
+                # Second-level rescue: still empty at the reasoner's hard cap
+                # (rare, ww_T1: 2/5 retries) → one attempt via the chat model,
+                # which has no CoT budget to exhaust. Real content beats a
+                # fallback template.
+                if not text:
+                    print(f"[{self.name}] reasoner still empty, falling back to chat model")
+                    resp = await asyncio.wait_for(
+                        self.fast_model(valid, temperature=temp, top_p=0.9, max_tokens=1500),
+                        timeout=timeout,
+                    )
+                    text = self._extract_text(resp)
+            return text
         except Exception as e:
-            print(f"[{self.name}] LLM error: {e}")
+            print(f"[{self.name}] LLM error ({'chat' if fast else 'reasoner'}): {e}")
             return ""
-        return self._extract_text(resp)
 
     def _extract_text(self, resp: Any) -> str:
         if resp is None:
@@ -932,11 +1360,25 @@ class PlayerAgent(ReActAgentBase):
         if role == "witch" and mode == "night":
             is_self_attacked = self.wm.night_killed == self.name
             heal_gone = self.wm.healing_used
-            if not is_self_attacked and not heal_gone and ("resurrect" in text.lower() or "救" in text):
-                return "resurrect"
+            # Resurrect intent: explicit "resurrect" or "救" NOT preceded by 不
+            # (old code matched "救" anywhere, so "我不救人" was read as save)
+            wants_save = ("resurrect" in text.lower()) or bool(re.search(r'(?<!不)救', text))
+            if is_self_attacked or heal_gone:
+                wants_save = False
             m = re.search(r'poison\s*[:：]?\s*(Player\d)', text, re.IGNORECASE)
-            if m and m.group(1) in alive and m.group(1) != self.name:
-                return m.group(1)
+            poison_target = m.group(1) if m and m.group(1) in alive and m.group(1) != self.name else None
+            # Hard rule enforcement: night-1 poison is banned regardless of
+            # what the LLM outputs (negative EV with zero information —
+            # see _night_role_body).
+            if poison_target and self.wm.round_num <= 1:
+                print(f"[{self.name}] 首夜禁毒规则: 忽略毒药指令({poison_target})")
+                poison_target = None
+            if wants_save and poison_target:
+                return f"resurrect+{poison_target}"  # Both potions in one night
+            if wants_save:
+                return "resurrect"
+            if poison_target:
+                return poison_target
             if any(w in text.lower() for w in ("none", "不用", "放弃", "pass")):
                 return "none"
             m = re.search(r'(Player\d)', text)
@@ -966,29 +1408,40 @@ class PlayerAgent(ReActAgentBase):
             if mates and candidate in mates:
                 print(f"[{self.name}] 拒绝{'杀' if mode=='night' else '投'}队友{candidate}，重选")
                 non_wolves = [p for p in alive if p not in mates and p != self.name]
-                return non_wolves[0] if non_wolves else ""
+                return random.choice(non_wolves) if non_wolves else ""
             # Seer cannot re-check already checked players
             if already_checked and candidate in already_checked:
                 print(f"[{self.name}] 拒绝重复查验{candidate}，重选")
                 unchecked = [p for p in alive if p not in already_checked and p != self.name]
-                return unchecked[0] if unchecked else ""
+                return random.choice(unchecked) if unchecked else ""
             if candidate in alive and candidate != self.name:
                 return candidate
-        # Fallback: LLM output malformed → pick first valid target
+        # R1 abstain (config-gated): honor an explicit abstain intent when no
+        # valid player target was extracted. Checked AFTER the player regex so
+        # "我不弃票，我投Player5" resolves to Player5, not abstain.
+        if mode == "vote" and self.wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN:
+            if re.search(r'abstain|弃票', text, re.IGNORECASE):
+                print(f"[{self.name}] 决策: 弃票")
+                return "abstain"
+        # Fallback: LLM output malformed → pick a RANDOM valid target.
+        # (A deterministic first-alive fallback makes all timed-out agents
+        # gang up on the same player — correlated failure bias.)
         if mates:
             non_wolves = [p for p in alive if p not in mates and p != self.name]
             if non_wolves:
-                print(f"[{self.name}] LLM输出异常，从好人中选: {non_wolves[0]}")
-                return non_wolves[0]
+                pick = random.choice(non_wolves)
+                print(f"[{self.name}] LLM输出异常，从好人中随机选: {pick}")
+                return pick
             return ""
         if already_checked:
             unchecked = [p for p in alive if p not in already_checked and p != self.name]
             if unchecked:
-                print(f"[{self.name}] LLM输出异常，从未查中选: {unchecked[0]}")
-                return unchecked[0]
+                pick = random.choice(unchecked)
+                print(f"[{self.name}] LLM输出异常，从未查中随机选: {pick}")
+                return pick
             return ""
         others = [p for p in alive if p != self.name]
-        return others[0] if others else ""
+        return random.choice(others) if others else ""
 
     def _extract_suspect(self, text: str) -> str:
         for pat in [
@@ -1017,7 +1470,15 @@ class PlayerAgent(ReActAgentBase):
             elif role == "witch":
                 if target == "resurrect":
                     self.wm.healing_used = True
+                    if self.wm.night_killed:
+                        self.wm.my_saves.append(self.wm.night_killed)  # 银水记录
                     plan.update(strategy="resurrect", suspect=self.wm.night_killed)
+                elif target.startswith("resurrect+"):
+                    self.wm.healing_used = True
+                    self.wm.poison_used = True
+                    if self.wm.night_killed:
+                        self.wm.my_saves.append(self.wm.night_killed)  # 银水记录
+                    plan.update(strategy="both", suspect=target.split("+", 1)[1])
                 elif target == "none":
                     plan.update(strategy="pass", suspect=None)
                 else:
@@ -1033,8 +1494,13 @@ class PlayerAgent(ReActAgentBase):
         return {"suspect": None, "strategy": "wait", "vote_plan": "",
                 "speech": "", "should_reveal_role": False}
 
-    def _fallback_plan(self) -> Dict:
-        """Fallback when LLM fails — still produce a reasonable speech."""
+    def _fallback_plan(self, is_last_words: bool = False) -> Dict:
+        """Fallback when LLM fails — still produce a reasonable speech.
+
+        Templates are split by context: an ALIVE player must never say
+        "before I was eliminated" (observed in real games — it confused
+        other agents' fact-checking).
+        """
         import random
         alive = self.wm.alive_players
         target = ""
@@ -1045,13 +1511,22 @@ class PlayerAgent(ReActAgentBase):
                     break
         if not target:
             others = [p for p in alive if p != self.name]
-            target = others[0] if others else "?"
-        tpls = [
-            f"我是{self.name}，已经被淘汰了。回顾这局游戏，我认为{target}的发言最值得怀疑。希望大家仔细分析投票记录，找出真正的狼人。",
-            f"作为{self.wm.my_role}，我在被淘汰前观察到{target}的行为模式很可疑。他在发言中多次回避关键问题，投票也跟风。请大家关注他。",
-            f"很遗憾我被淘汰了。我的建议是重点关注{target}，他的逻辑链有明显的漏洞。好人阵营加油。",
-        ]
+            target = random.choice(others) if others else "?"
+        if is_last_words:
+            tpls = [
+                f"我是{self.name}，已经被淘汰了。回顾这局游戏，我认为{target}最值得怀疑。希望大家仔细分析投票记录，找出真正的狼人。",
+                f"很遗憾我被淘汰了。我的建议是重点关注{target}，他的逻辑链有明显的漏洞。好人阵营加油。",
+            ]
+        else:
+            tpls = [
+                f"我是{self.name}。这轮我重点怀疑{target}，他的发言缺乏实质分析，投票也跟风中立。我投{target}。",
+                f"听完大家的发言，我认为{target}的立场最不清晰，既没有给出有效信息，也没有明确站边。本轮我投{target}。",
+                f"从目前的信息看，{target}的行为模式最可疑。我本轮投{target}，也欢迎大家提出反证。",
+            ]
         speech = random.choice(tpls)
+        # Keep the machine-checkable commitment line consistent
+        if not is_last_words and target != "?":
+            speech += f"\n投票意向: {target}"
         print(f"[{self.name}] {speech}")
         self.memory.add(MemoryEntry(
             EntryType.MY_SPEECH, self.wm.round_num, self.name, speech,
@@ -1083,7 +1558,23 @@ class PlayerAgent(ReActAgentBase):
     def _structured_vote(self, plan: Dict) -> Msg:
         target = plan.get("vote_plan", "")
         alive = self.wm.alive_players
+        r1_abstain = (self.wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN)
+        if target == "abstain" and r1_abstain:
+            print(f"[{self.name}] 投票 → abstain（弃票）")
+            self.state.setdefault("round_votes", []).append(
+                {"round": self.wm.round_num, "target": "abstain"}
+            )
+            return Msg(name=self.name, content="abstain", role="assistant",
+                       metadata={"vote": "abstain"})
         if target not in alive or target == self.name:
+            # R1: abstain beats a random lynch when the decision failed
+            if r1_abstain:
+                print(f"[{self.name}] 投票 → abstain（弃票，决策无有效目标）")
+                self.state.setdefault("round_votes", []).append(
+                    {"round": self.wm.round_num, "target": "abstain"}
+                )
+                return Msg(name=self.name, content="abstain", role="assistant",
+                           metadata={"vote": "abstain"})
             if self.bt:
                 for name, _ in self.bt.get_suspect_ranking(alive):
                     if name != self.name:
@@ -1091,9 +1582,13 @@ class PlayerAgent(ReActAgentBase):
                         break
             if target not in alive or target == self.name:
                 others = [p for p in alive if p != self.name]
-                target = others[0] if others else ""
+                target = random.choice(others) if others else ""
         print(f"[{self.name}] 投票 → {target}")
         _emit_web("vote", {"voter": self.name, "target": target})
+        # Record for post-game data collection
+        self.state.setdefault("round_votes", []).append(
+            {"round": self.wm.round_num, "target": target}
+        )
         return Msg(name=self.name, content=target, role="assistant",
                    metadata={"vote": target})
 
@@ -1108,6 +1603,9 @@ class PlayerAgent(ReActAgentBase):
                 meta["resurrect"] = True
             elif strategy == "poison":
                 meta["poison"], meta["name"] = True, target
+            elif strategy == "both":
+                meta["resurrect"] = True
+                meta["poison"], meta["name"] = True, target
             else:
                 meta["poison"] = False
         elif role == "hunter":
@@ -1118,7 +1616,7 @@ class PlayerAgent(ReActAgentBase):
             meta["reach_agreement"] = True
             meta["proposed_target"] = target
         action_labels = {"kill": "击杀", "check": "查验", "resurrect": "救人",
-                         "poison": "毒杀", "shoot": "开枪", "pass": "无行动"}
+                         "poison": "毒杀", "both": "救人+毒杀", "shoot": "开枪", "pass": "无行动"}
         label = action_labels.get(strategy, strategy)
         if strategy == "pass":
             print(f"[{self.name}] {label}")
@@ -1126,6 +1624,10 @@ class PlayerAgent(ReActAgentBase):
             print(f"[{self.name}] {label}: {target}")
         _emit_web("night_action", {"player": self.name, "action": label,
                                     "target": target, "strategy": strategy})
+        # Record for post-game data collection
+        self.state.setdefault("actions", []).append(
+            {"round": self.wm.round_num, "action": strategy, "target": target}
+        )
         return Msg(name=self.name,
                    content=f"{role} chooses {target}" if target else f"{role} passes",
                    role="assistant", metadata=meta)
@@ -1197,6 +1699,10 @@ class PlayerAgent(ReActAgentBase):
         if api_key:
             self.model = OpenAIChatModel(
                 model_name="deepseek-reasoner", api_key=api_key, stream=False,
+                client_kwargs={"base_url": "https://api.deepseek.com"},
+            )
+            self.fast_model = OpenAIChatModel(
+                model_name="deepseek-chat", api_key=api_key, stream=False,
                 client_kwargs={"base_url": "https://api.deepseek.com"},
             )
         self.formatter = DeepSeekMultiAgentFormatter()
