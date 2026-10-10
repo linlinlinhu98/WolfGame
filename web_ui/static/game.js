@@ -28,19 +28,16 @@ evtSource.onopen = async () => {
     } catch (e) {}
 };
 
-/* ── Icons (inline SVG snippets) ───────────────────────────────── */
+/* ── Icons (inline SVG snippets, mirrors the sprite in index.html) ── */
 const ICONS = {
-    /* Role icons — distinct silhouettes per role:
-       wolf head (ears + eye cutouts) / straw-hat farmer / crystal ball /
-       pointed witch hat / bolt-action rifle. Monochrome, 24x24. */
-    wolf:    '<svg viewBox="0 0 24 24"><path fill-rule="evenodd" d="M4.5 3.2 L9.4 6.6 L14.6 6.6 L19.5 3.2 L20.1 10.6 C20.1 15.9 16.7 19.7 12 21.6 C7.3 19.7 3.9 15.9 3.9 10.6 Z M8.9 10.9 a1.45 1.45 0 1 0 2.9 0 a1.45 1.45 0 1 0 -2.9 0 Z M12.2 10.9 a1.45 1.45 0 1 0 2.9 0 a1.45 1.45 0 1 0 -2.9 0 Z"/></svg>',
-    villager:'<svg viewBox="0 0 24 24"><path d="M8.2 6.4 C8.2 3.6 15.8 3.6 15.8 6.4 Z M4 8.6 C4 7.3 7.5 6.5 12 6.5 C16.5 6.5 20 7.3 20 8.6 C20 9.9 16.5 10.7 12 10.7 C7.5 10.7 4 9.9 4 8.6 Z M10 11.6 a2 2 0 1 0 4 0 a2 2 0 1 0 -4 0 Z M5.4 21 C5.4 16.4 8.5 14.1 12 14.1 C15.5 14.1 18.6 16.4 18.6 21 Z"/></svg>',
-    seer:    '<svg viewBox="0 0 24 24"><path fill-rule="evenodd" d="M5.6 9.4 a6.4 6.4 0 1 0 12.8 0 a6.4 6.4 0 1 0 -12.8 0 Z M12 5.8 l1.15 2.45 2.45 1.15 -2.45 1.15 -1.15 2.45 -1.15 -2.45 -2.45 -1.15 2.45 -1.15 Z M7 21 L8.5 16.9 C9.6 17.7 10.75 18.1 12 18.1 C13.25 18.1 14.4 17.7 15.5 16.9 L17 21 Z"/></svg>',
-    witch:   '<svg viewBox="0 0 24 24"><path d="M11.3 2.2 C12.1 6 13.2 9.4 14.6 12.1 L8 12.1 C9.6 9.3 10.8 5.7 11.3 2.2 Z M3.2 14.7 C3.2 13.2 7.2 12.2 12 12.2 C16.8 12.2 20.8 13.2 20.8 14.7 C20.8 16.2 16.8 17.2 12 17.2 C7.2 17.2 3.2 16.2 3.2 14.7 Z"/></svg>',
-    hunter:  '<svg viewBox="0 0 24 24"><path d="M20.8 5.8 L18.2 3.2 L13.3 8.1 L4.2 17.2 L6.8 19.8 L15.9 10.7 L17.5 12.3 L20.1 9.7 L18.5 8.1 Z M7.4 20.4 L5.6 18.6 L7.8 16.4 L9.6 18.2 Z"/></svg>',
+    wolf:    '<svg viewBox="0 0 24 24"><path d="M12 2L9.5 6h-4L7 10.5 3 13l2.5 3.5L4 21l5.5-1.5L12 22l2.5-2.5L20 21l-1.5-4.5L21 13l-4-2.5L18.5 6h-4L12 2zm0 3.5l1.2 2h-2.4l1.2-2zM8.2 8h7.6l-.7 2.2 2.8 1.8-1.2 1.7 1 3.1-2.8-.8L12 18.2l-1.9-2.2-2.8.8 1-3.1-1.2-1.7 2.8-1.8L8.2 8z"/></svg>',
+    villager:'<svg viewBox="0 0 24 24"><path d="M12 2a4 4 0 0 1 4 4c0 1.5-.8 2.8-2 3.4V10h4a2 2 0 0 1 2 2v1c0 2.2-1.8 4-4 4h-1v4h2v2H7v-2h2v-4H8c-2.2 0-4-1.8-4-4v-1a2 2 0 0 1 2-2h4V9.4A4 4 0 0 1 8 6a4 4 0 0 1 4-4zm0 2a2 2 0 0 0-2 2 2 2 0 0 0 2 2 2 2 0 0 0 2-2 2 2 0 0 0-2-2z"/></svg>',
+    seer:    '<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.7 7.6 1 12c1.7 4.4 6 7.5 11 7.5s9.3-3.1 11-7.5C21.3 7.6 17 4.5 12 4.5zm0 2a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11zm0 2a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/></svg>',
+    witch:   '<svg viewBox="0 0 24 24"><path d="M17.5 15.5l3.5 6.5h-17l6-10.5 1.5 2.5 3-5 2 4 1 2.5zM12 2l2.5 4.5h-5L12 2zm-5 20h10v-1H7v1z"/></svg>',
+    hunter:  '<svg viewBox="0 0 24 24"><path d="M20.7 3.3l-2.4 2.4c-.6-.4-1.4-.3-1.9.2l-9.5 9.5c-.7.7-.8 1.8-.2 2.5l-3.3 3.3 1.4 1.4 3.3-3.3c.7.6 1.8.5 2.5-.2l9.5-9.5c.5-.5.6-1.3.2-1.9l2.4-2.4-1.4-1.4zM7.5 19.5l-1.7 1.7L4 19.4l1.7-1.7 1.8 1.8z"/></svg>',
     unknown: '<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.5 3.8 10.7 9 12 5.2-1.3 9-6.5 9-12V5l-9-4zm0 10.8c-1.5 0-2.8-1.2-2.8-2.8S10.5 6.2 12 6.2s2.8 1.2 2.8 2.8-1.3 2.8-2.8 2.8z"/></svg>',
-    chat:    '<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>',
-    sun:     '<svg viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zm0-5h2v3h-2V2zm0 17h2v3h-2v-3zM4.2 4.2l2.1 2.1-1.4 1.4-2.1-2.1 1.4-1.4zm13.4 13.4 2.1 2.1-1.4 1.4-2.1-2.1 1.4-1.4zM2 12h3v2H2v-2zm17 0h3v2h-3v-2zM4.2 19.8l1.4-1.4 2.1 2.1-1.4 1.4-2.1-2.1zm13.4-13.4 1.4-1.4 2.1 2.1-1.4 1.4-2.1-2.1z"/></svg>',
+    chat:    '<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>',
+    sun:     '<svg viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zm0-5h2v3h-2V2zm0 17h2v3h-2v-3zM4.2 4.2l2.1 2.1-1.4 1.4-2.1-2.1 1.4-1.4zm13.4 13.4 2.1 2.1-1.4 1.4-2.1-2.1 1.4-1.4-2.1-2.1zm13.4-13.4 1.4-1.4 2.1 2.1-1.4 1.4-2.1-2.1z"/></svg>',
     moon:    '<svg viewBox="0 0 24 24"><path d="M12.5 3c.5 0 1 .1 1.5.2A8 8 0 0 0 12 19 8 8 0 0 1 12.5 3z"/></svg>',
     vote:    '<svg viewBox="0 0 24 24"><path d="M18 13h-.7l-2-6H8.7l-2 6H6c-1.1 0-2 .9-2 2v5h16v-5c0-1.1-.9-2-2-2zM9.8 9h4.4l1.5 4H8.3l1.5-4zM6 20v-4h12v4H6z"/></svg>',
     skull:   '<svg viewBox="0 0 24 24"><path d="M12 2a6 6 0 0 0-6 6c0 2.2 1.2 4.2 3 5.3V17c0 1.1.9 2 2 2h2c1.1 0 2-.9 2-2v-3.7c1.8-1.1 3-3.1 3-5.3a6 6 0 0 0-6-6zm-3 14h6v1H9v-1zm1-8a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm4 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>',
@@ -215,10 +212,6 @@ function handle(msg) {
             break;
         }
 
-        case "announce":
-            addLog("announceBar", `<span class="sys">${esc(msg.data.text)}</span>`);
-            break;
-
         case "speech":
             addDayHeader();
             addLog("dayLog", `<span class="spk">[${esc(msg.data.player)}]</span> ${esc(msg.data.content)}`);
@@ -293,13 +286,6 @@ function handle(msg) {
             document.getElementById("inputArea").style.display = "none";
             break;
 
-        case "_wake":
-            break;
-
-        case "reset":
-            document.getElementById("phaseLabel").textContent = "已重置";
-            document.getElementById("inputArea").style.display = "none";
-            break;
     }
 }
 
@@ -554,8 +540,7 @@ function addLog(id, html) {
     d.className = "log-entry";
     d.innerHTML = html;
     log.appendChild(d);
-    // Panels grow with content now — scroll the page to the newest entry
-    d.scrollIntoView({ block: "nearest" });
+    log.scrollTop = log.scrollHeight;
 }
 
 function phLabel(p) {
