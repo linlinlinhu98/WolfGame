@@ -80,6 +80,11 @@ class PlayerAgent(ReActAgentBase):
         self.memory = EpisodicMemory(name)
         self.bt: BeliefTracker | None = None
         self._speech_summaries: List[SpeechSummary] = []  # Compressed memory
+        # Werewolves only: SpeechSummaries of MY OWN public speeches, kept so
+        # the discussion prompt can hold me to what I already said (see
+        # _wolf_self_consistency_block). extract_speech_facts is normally run
+        # on OTHERS' speeches only.
+        self._my_speech_summaries: List[SpeechSummary] = []
 
         # Persona (randomly assigned, unique per agent)
         self.persona: Persona = random.choice(PERSONAS)
@@ -549,6 +554,13 @@ class PlayerAgent(ReActAgentBase):
             EntryType.MY_SPEECH, self.wm.round_num, self.name, public,
             importance=3, metadata={"role": self.wm.my_role}
         ))
+        # Wolf self-consistency archive: summarize what I JUST said publicly
+        # (post-clean, post-投票意向 restoration — the exact words everyone
+        # heard) so later prompts can hold me to it.
+        if self.wm.my_role == "werewolf" and config.WOLF_SELF_CONSISTENCY:
+            my_sum = extract_speech_facts(self.name, public)
+            my_sum.round_num = self.wm.round_num
+            self._my_speech_summaries.append(my_sum)
 
         suspect = self._extract_suspect(public)
         return {"speech": public, "suspect": suspect, "strategy": "discuss",
@@ -835,6 +847,67 @@ class PlayerAgent(ReActAgentBase):
                 lines.append("两人查验链都与死亡记录矛盾——都不可信，勿跟任何一方的查杀。")
         return "\n".join(lines)
 
+    def _wolf_self_consistency_block(self) -> str:
+        """Archive of MY OWN prior public statements, prepended to the wolf's
+        discussion prompt so its lie stays consistent across days.
+
+        Contains only what this agent said itself and what the ledger already
+        records publicly — zero hidden information, just a memory fix. The
+        wolf's measurable #1 exposure is forgetting its own words: fabricated
+        check chains that drift from the death timeline, votes that contradict
+        the 投票意向 line. Mirrors _seer_claim_block's style (header + bullets
+        + deterministic verdict line).
+
+        Returns "" when there is nothing on record yet (round 1, no speech).
+        """
+        if not self._my_speech_summaries and not self.memory.my_speeches():
+            return ""
+        wm = self.wm
+        lines = ["【你的历史发言存档——全场都听得到，本轮必须与之一致】"]
+
+        # 1. Identity claims (悍跳事实) + per-round accusations/defenses/votes
+        my_votes: Dict[str, str] = {}   # round -> player I actually voted for
+        for e in wm.public_ledger:
+            tgt = (e.get("votes") or {}).get(self.name)
+            if tgt:
+                my_votes.setdefault(e["round"], tgt)
+        claims_all: List[str] = []
+        for s in sorted(self._my_speech_summaries, key=lambda x: x.round_num):
+            bits = []
+            if s.claims:
+                claims_all.extend(s.claims)
+                bits.append("你公开声称: " + "、".join(sorted(set(s.claims))))
+            if s.accusations:
+                bits.append("你怀疑过: " + "、".join(sorted(set(s.accusations))))
+            if s.defenses:
+                bits.append("你辩护过: " + "、".join(sorted(set(s.defenses))))
+            if s.stated_vote:
+                line = f"你承诺投票意向: {s.stated_vote}"
+                actual = my_votes.get(s.round_num)
+                if actual and actual != s.stated_vote:
+                    line += f"（实际投了 {actual} ⚠️已翻供，勿再轻易改口）"
+                bits.append(line)
+            if bits:
+                lines.append(f"第{s.round_num}轮: " + "；".join(bits))
+        if claims_all:
+            lines.append(
+                "⚠️ 你已经跳过身份（" + "、".join(sorted(set(claims_all)))
+                + "）。查验链必须逐日延续、逐字一致；如果还没报过完整查验链，"
+                "本轮必须补上（第R轮查X=结果），报不出查验链会被当成假预言家。")
+
+        # 2. Deterministic contradictions in my own check chain (ledger-based)
+        contra = self._chain_contradictions(self.name)
+        if contra:
+            lines.append("⚠️ 你此前发言中已被【权威记录】证伪的声称（确定性结论）:")
+            lines.extend(f"- {c}" for c in contra)
+            lines.append("不要再重复这些已被证伪的说法；如需继续伪装，换一套与死亡时间线一致的口径。")
+
+        # 3. Closing discipline
+        lines.append(
+            "以上是你的公开承诺。本轮发言、查验报告、投票意向必须与历史一致；"
+            "确需改口，必须给出新证据并公开承认之前判断有误，禁止无声反转。")
+        return "\n".join(lines)
+
     def _ledger_block(self) -> str:
         """Authoritative public record, rendered verbatim from the
         engine-pushed ground truth in WorkingMemory.public_ledger.
@@ -1115,8 +1188,9 @@ class PlayerAgent(ReActAgentBase):
                 )
         elif is_wolf:
             format_line = (
-                "内部: (伪装策略一句话)\n"
-                "公开: (以村民视角发言，指出怀疑对象+理由+投谁，60-150字)\n"
+                "内部: (伪装策略一句话——装村民还是假跳神职，为什么)\n"
+                "公开: (以好人视角发言：默认装村民；按【可选策略】判断是否值得假跳神职。"
+                "指出怀疑对象+理由+投谁，60-150字)\n"
                 "投票意向: (你要投的玩家，单独一行)"
             )
         else:
@@ -1132,6 +1206,14 @@ class PlayerAgent(ReActAgentBase):
             "\n".join(lines),
             "",
         ]
+        # Wolf self-consistency archive: my own prior public statements, as
+        # early as possible (after identity/rules, before all context) so the
+        # wolf keeps its story straight. Nothing here is hidden info.
+        if is_wolf and config.WOLF_SELF_CONSISTENCY:
+            self_block = self._wolf_self_consistency_block()
+            if self_block:
+                parts.append(self_block)
+                parts.append("")
         if verify_lines:
             parts.append("【⚠️ 验证：别人说了关于你的事——用你的私人知识判断真假】")
             parts.extend(verify_lines)
@@ -1177,7 +1259,18 @@ class PlayerAgent(ReActAgentBase):
                 "🎯 胜利条件: 存活狼人数 ≥ 存活好人数（狼人达到半数即获胜）。\n"
                 "⚠️ 铁律: 绝不说自己是狼人！不说'狼队友''我们狼人'！\n"
                 "数值推理: 共3狼。每死一个队友，剩2狼需存活≥2好人时获胜。\n"
-                "策略: 伪装村民视角发言，怀疑好人、保护队友。\n"
+                "基础策略: 以好人视角发言，怀疑好人、保护队友。\n"
+                "【可选策略: 假跳神职（经典狼人打法）】\n"
+                "- 假跳预言家: 报一条查验链（第R轮查X=好人/狼人）抢投票主导权，"
+                "号召大家投你'查杀'的好人。时机: 队友被查杀时对跳分票、"
+                "你自己即将被投出局时搏命、或真预言家始终不跳时抢先起跳。\n"
+                "- 假跳女巫/猎人: 声称神职身份让好人不敢轻易处决你，适合被重点怀疑时自保。\n"
+                "‼️ 假跳纪律（违反=当场暴露）:\n"
+                "1) 报预言家查验链时，每个声称的查验目标在声称的那一轮必须还活着"
+                "（对照【权威记录】死亡时间线——对死人查验=被证伪=必被投出）;\n"
+                "2) 查验链必须与你之前说过的每句话一致（见你的历史发言存档），禁止自相矛盾;\n"
+                "3) 假跳一旦被查证撒谎几乎必死，收益高、风险也高——真预言家已跳出且"
+                "查验链被全场采信时，悍跳成功率低，量力而行。\n"
                 "投票时: 投你发言中怀疑的人，保持言行一致不暴露。"
             )
         elif role == "seer":

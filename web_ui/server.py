@@ -38,10 +38,55 @@ def _unregister(q: queue.Queue):
 
 
 def _broadcast(event: dict):
+    event = _human_view_filter(event)
+    if event is None:
+        return
     with _subscribers_lock:
         subs = list(_subscribers)
     for q in subs:
         q.put(event)
+
+
+# Private-info markers → the only role allowed to see them. Anything emitted
+# with these markers must never reach a player who doesn't hold the role.
+_PRIVATE_MARKERS = {
+    "仅狼人可见": "werewolf",
+    "WEREWOLVES ONLY": "werewolf",
+    "仅女巫可见": "witch",
+    "仅预言家可见": "seer",
+    "仅猎人可见": "hunter",
+}
+
+
+def _human_view_filter(event: dict):
+    """Player mode: strip events that would leak hidden information through
+    the raw SSE stream (a human can read it in browser devtools and cheat).
+    God mode: everything is public, pass through unchanged."""
+    if _session["mode"] != "player":
+        return event
+    human = _session.get("human")
+    role = getattr(getattr(human, "wm", None), "my_role", None)
+    t = event.get("type")
+    d = event.get("data") or {}
+    # Wolf kill proposals: wolves only. Seer results: the seer only.
+    if t == "wolf_proposal" and role != "werewolf":
+        return None
+    if t == "seer_result" and role != "seer":
+        return None
+    # Night actions: only your own; wolves additionally see teammates' kills.
+    if t == "night_action":
+        if d.get("player") == "Player1":
+            return event
+        if role == "werewolf" and d.get("strategy") == "kill":
+            return event
+        return None
+    # Moderator logs marked role-private: strip unless the human holds the role.
+    if t == "phase_log":
+        text = str(d.get("text", ""))
+        for marker, allowed in _PRIVATE_MARKERS.items():
+            if marker in text and role != allowed:
+                return None
+    return event
 
 
 def _make_emit(_ignored=None):
@@ -213,7 +258,12 @@ def _run_player_game(role_choice):
     import asyncio
     from agent import PlayerAgent
     from game import werewolves_game
-    from web_human import WebHumanAgent
+    # Works both when run as a script (python server.py) and as a package
+    # module (python -m web_ui.server)
+    try:
+        from web_human import WebHumanAgent
+    except ImportError:
+        from web_ui.web_human import WebHumanAgent
     import game as gm
     import agent as ag
     my_emit = _make_emit()

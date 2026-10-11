@@ -7,6 +7,7 @@ let gs = { players: {}, round: 0, phase: "init" };
 let ctx = {};
 let currentNight = 0, currentDay = 0;
 let allowAbstain = true;  // R1 abstain rule — set from the start-screen toggle
+let witchHealPick = null; // witch two-step decision state (null = not chosen yet)
 
 const evtSource = new EventSource("/stream");
 evtSource.onmessage = e => handle(JSON.parse(e.data));
@@ -325,7 +326,7 @@ function showInput() {
     document.getElementById("voteInput").style.display = ph === "voting" ? "" : "none";
     document.getElementById("actionInput").style.display = ph === "night" ? "" : "none";
     if (ph === "voting") buildVoteBtns();
-    if (ph === "night") buildActionBtns();
+    if (ph === "night") { witchHealPick = null; buildActionBtns(); }
     if (myRole === "werewolf" && ph === "night") document.getElementById("wolfChannel").style.display = "";
 }
 
@@ -348,10 +349,8 @@ function buildHint() {
     if (r === "witch") {
         const h = ctx.healing_used ? "已用" : "可用";
         const p = ctx.poison_used ? "已用" : "可用";
-        const stage = ctx.witch_stage || "";
-        if (stage === "resurrect") return `女巫 | 解药:${h} | 今晚 ${ctx.night_killed || "?"} 被杀，是否使用解药？`;
-        if (stage === "poison") return `女巫 | 毒药:${p} | 选择一名玩家使用毒药，或跳过。`;
-        return `女巫 | 解药:${h} 毒药:${p} | 今晚 ${ctx.night_killed || "?"} 被杀`;
+        const nk = ctx.night_killed ? `今晚 ${ctx.night_killed} 被杀` : "今晚平安夜";
+        return `女巫 | 解药:${h} 毒药:${p} | ${nk}。请依次确认解药与毒药的使用。`;
     }
     if (r === "seer") {
         const s = Object.entries(ctx.seer_checks || {}).map(([n, r2]) => `${esc(n)}=${roleLabel(r2)}`).join(", ") || "无";
@@ -410,52 +409,39 @@ function buildActionBtns() {
         });
     }
     else if (r === "witch") {
-        const stage = ctx.witch_stage || "";
-        if (stage === "resurrect") {
-            if (!ctx.healing_used && ctx.night_killed && ctx.night_killed !== myName) {
-                const hb = document.createElement("button");
-                hb.className = "btn abtn heal";
-                hb.innerHTML = `${ICONS.heal}<span>救 ${esc(ctx.night_killed)}</span>`;
-                hb.onclick = () => send("resurrect");
-                div.appendChild(hb);
-            }
+        // Two-step structured decision: heal choice first, then poison.
+        // Submission strings: "resurrect" | "poison:X" | "resurrect+poison:X" | "none"
+        const canHeal = !ctx.healing_used && ctx.night_killed && ctx.night_killed !== myName;
+        const canPoison = !ctx.poison_used;
+        if (witchHealPick === null && canHeal) {
+            const hb = document.createElement("button");
+            hb.className = "btn abtn heal";
+            hb.innerHTML = `${ICONS.heal}<span>救 ${esc(ctx.night_killed)}</span>`;
+            hb.onclick = () => { witchHealPick = true; buildActionBtns(); };
+            div.appendChild(hb);
             const nb = document.createElement("button");
             nb.className = "btn btn-secondary";
             nb.textContent = "不救";
-            nb.onclick = () => send("none");
+            nb.onclick = () => { witchHealPick = false; buildActionBtns(); };
             div.appendChild(nb);
-        } else if (stage === "poison") {
+        } else if (canPoison) {
             alive.forEach(n => {
                 const b = document.createElement("button");
                 b.className = "btn abtn poison";
                 b.innerHTML = `${ICONS.poison}<span>毒 ${esc(n)}</span>`;
-                b.onclick = () => send("poison:" + n);
+                b.onclick = () => send((witchHealPick ? "resurrect+poison:" : "poison:") + n);
                 div.appendChild(b);
             });
             const nb = document.createElement("button");
             nb.className = "btn btn-secondary";
-            nb.textContent = "不用毒";
-            nb.onclick = () => send("none");
+            nb.textContent = witchHealPick ? "只救，不用毒" : "不用毒";
+            nb.onclick = () => send(witchHealPick ? "resurrect" : "none");
             div.appendChild(nb);
         } else {
-            if (!ctx.healing_used && ctx.night_killed && ctx.night_killed !== myName) {
-                const hb = document.createElement("button");
-                hb.className = "btn abtn heal";
-                hb.innerHTML = `${ICONS.heal}<span>救 ${esc(ctx.night_killed)}</span>`;
-                hb.onclick = () => send("resurrect");
-                div.appendChild(hb);
-            }
-            alive.forEach(n => {
-                const b = document.createElement("button");
-                b.className = "btn abtn poison";
-                b.innerHTML = `${ICONS.poison}<span>毒 ${esc(n)}</span>`;
-                b.onclick = () => send("poison:" + n);
-                div.appendChild(b);
-            });
             const nb = document.createElement("button");
             nb.className = "btn btn-secondary";
-            nb.textContent = "跳过";
-            nb.onclick = () => send("none");
+            nb.textContent = witchHealPick ? "确认：只救，不用毒" : "今晚都不用";
+            nb.onclick = () => send(witchHealPick ? "resurrect" : "none");
             div.appendChild(nb);
         }
     }

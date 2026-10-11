@@ -11,6 +11,11 @@ from _vendor import Msg
 from agent import PlayerAgent
 import config
 
+try:
+    from web_ui.server import emit_event as _emit_web
+except ImportError:  # web_ui not importable (e.g. console-only entry)
+    _emit_web = lambda t, d: None
+
 
 class WebHumanAgent(PlayerAgent):
     """Human player agent that waits for web UI input.
@@ -59,12 +64,10 @@ class WebHumanAgent(PlayerAgent):
             "poison_used": wm.poison_used,
             "seer_checks": dict(wm.seer_checks),
         }
-        # Detect witch stage from prompt content
-        if wm.my_role == "witch" and wm.phase == "night":
-            if "resurrect" in msg_content.lower() or "救" in msg_content or "解药" in msg_content:
-                info["witch_stage"] = "resurrect"
-            elif "poison" in msg_content.lower() or "毒药" in msg_content or "毒杀" in msg_content:
-                info["witch_stage"] = "poison"
+        # Witch stage is no longer sniffed from prompt text — the frontend
+        # builds a two-step (heal -> poison) decision from the potion flags
+        # (healing_used / poison_used / night_killed) and sends the exact
+        # structured string ("resurrect" / "poison:X" / "resurrect+poison:X").
         # Add teammate info for werewolves (from the private TEAM_INFO channel)
         if wm.my_role == "werewolf":
             info["teammates"] = [m for m in wm.my_teammates
@@ -105,20 +108,29 @@ class WebHumanAgent(PlayerAgent):
             return Msg(name=self.name, content=speech, role="assistant",
                        metadata={"human": True})
         if wm.phase == "voting":
-            vote = await self._wait_for_input()
             alive = wm.alive_players
-            # R1 abstain (config-gated): same rule as AI agents — the human
-            # may abstain in round 1 when config.ALLOW_R1_ABSTAIN is on.
-            if vote.strip().lower() == "abstain" and wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN:
-                _emit_web("vote", {"voter": self.name, "target": "abstain"})
-                return Msg(name=self.name, content="abstain", role="assistant",
-                           metadata={"vote": "abstain", "human": True})
-            if vote not in alive or vote == self.name:
-                others = [p for p in alive if p != self.name]
-                vote = others[0] if others else ""
-            _emit_web("vote", {"voter": self.name, "target": vote})
-            return Msg(name=self.name, content=vote, role="assistant",
-                       metadata={"vote": vote, "human": True})
+            # Strict vote loop: invalid input re-prompts instead of silently
+            # coercing to another player. Empty input (what _stop_old_game
+            # feeds the future to unblock an aborted game) still falls back
+            # to a legal target so a reset game never hangs.
+            while True:
+                vote = await self._wait_for_input()
+                v = vote.strip()
+                if v.lower() == "abstain" and wm.round_num <= 1 and config.ALLOW_R1_ABSTAIN:
+                    _emit_web("vote", {"voter": self.name, "target": "abstain"})
+                    return Msg(name=self.name, content="abstain", role="assistant",
+                               metadata={"vote": "abstain", "human": True})
+                if v == "":
+                    others = [p for p in alive if p != self.name]
+                    v = others[0] if others else ""
+                    break
+                if v in alive and v != self.name:
+                    break
+                _emit_web("phase_log", {"panel": "day",
+                          "text": f"⚠️ {self.name} 的投票「{v[:30]}」无效，请从存活玩家中重新选择。"})
+            _emit_web("vote", {"voter": self.name, "target": v})
+            return Msg(name=self.name, content=v, role="assistant",
+                       metadata={"vote": v, "human": True})
 
         return Msg(name=self.name, content="", role="assistant")
 
@@ -131,10 +143,21 @@ class WebHumanAgent(PlayerAgent):
         if role == "seer":
             meta["name"] = text if text in alive else (alive[0] if alive else "")
         elif role == "witch":
-            if text.lower().startswith("resurrect"):
+            # Structured protocol (no keyword sniffing): the UI sends exactly
+            # "resurrect" | "poison:<名>" | "resurrect+poison:<名>" | "none".
+            t = text.lower()
+            if t.startswith("resurrect"):
                 meta["resurrect"] = True
                 self.wm.healing_used = True
-            elif text.lower().startswith("poison:"):
+                if "+poison:" in t:
+                    target = text.split("+poison:", 1)[1].strip()
+                    if target in alive:
+                        meta["poison"] = True
+                        meta["name"] = target
+                        self.wm.poison_used = True
+                    else:
+                        meta["poison"] = False
+            elif t.startswith("poison:"):
                 target = text.split(":", 1)[1].strip()
                 if target in alive:
                     meta["poison"] = True
